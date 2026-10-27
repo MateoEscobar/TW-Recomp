@@ -1,0 +1,48 @@
+# Build output
+build/
+deploy/
+dist/
+
+# Recompiler generated sources (massive, regenerated each build)
+games/warriors/work/
+games/warriors/recomp_out/
+
+# Game assets extracted from ISO — NEVER commit game data
+games/warriors/assets/
+games/warriors/*.iso
+games/warriors/*.img
+*.iso
+*.img
+*.7z
+
+# Save files
+*.sav
+*.mcr
+
+# IDE / OS
+.vscode/
+.idea/
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Logs
+logs/
+*.log
+
+# Python cache (scripts)
+__pycache__/
+*.pyc
+*.pyo
+
+# Texture packs (user-provided, not committed)
+textures/packs/
