@@ -47,3 +47,4 @@ __pycache__/
 
 # Texture packs (user-provided, not committed)
 textures/packs/
+.scannerwork/
