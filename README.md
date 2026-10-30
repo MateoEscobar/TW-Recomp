@@ -2,6 +2,7 @@
   <h1>TW-Recomp</h1>
   <p><strong>The Warriors — Native PC Port via Static Recompilation</strong></p>
   <p>
+    <a href="https://github.com/MateoEscobar/TW-Recomp/actions/workflows/build.yml"><img src="https://github.com/MateoEscobar/TW-Recomp/actions/workflows/build.yml/badge.svg" alt="CI Build"></a>
     <img src="https://img.shields.io/badge/status-early%20dev-orange" alt="Status">
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue" alt="Platforms">
     <img src="https://img.shields.io/badge/engine-RenderWare%203.x-lightgrey" alt="Engine">
