@@ -577,6 +577,9 @@ public:
     void drainCompletedDmacHandlers(uint8_t *rdram);
     bool shouldPreemptGuestExecution();
     void yieldGuestExecutionAfterWake();
+    // [eecheck] called at backward edges in generated code; yields the scheduler slice when enough
+    // EE cycles have accumulated. Returns true to signal the dispatcher to re-enter at ctx->pc.
+    bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
     void requestStop();
     bool isStopRequested() const;
     uint32_t guestExecutionWaiterCountForTesting() const

@@ -6396,6 +6396,24 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     }
 }
 
+bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+{
+    // [eecheck] ps2xRecomp emits this call at every backward edge so the host can service
+    // IOP/VBlank events without waiting for the generated function to return naturally.
+    // We count EE cycles; once a slice expires we yield to the cooperative scheduler
+    // (if enabled) and return true so the generated function exits to the dispatcher.
+    thread_local uint64_t t_accum = 0;
+    constexpr uint64_t kSliceCycles = 65536u;
+    t_accum += cycles;
+    if (t_accum < kSliceCycles)
+        return false;
+    t_accum = 0;
+    if (!m_schedEnabled)
+        return false;
+    schedYield(g_schedTid);
+    return true;
+}
+
 void PS2Runtime::requestStop()
 {
     m_stopRequested.store(true, std::memory_order_relaxed);

@@ -693,6 +693,19 @@ static inline float ps2FpuSat(float f)
 #define FPU_MUL_S(a, b) ps2FpuSat((float)(a) * (float)(b))
 #define FPU_DIV_S(a, b) ps2FpuSat((float)(a) / (float)(b))
 #define FPU_SQRT_S(a) sqrtf(fabsf((float)(a)))
+// EE FPU RSQRT: a / sqrt(b) with PS2 float semantics (no Inf/NaN, saturate to +/-Fmax).
+static inline float ps2_fpu_rsqrt(float a, float b)
+{
+    constexpr uint32_t kFmax = 0x7FFFFFFFu;
+    if ((std::bit_cast<uint32_t>(b) & 0x7F800000u) == 0u)
+        return std::bit_cast<float>((std::bit_cast<uint32_t>(a) & 0x80000000u) | kFmax);
+    const float root = sqrtf(fabsf(b));
+    const float r    = a / root;
+    if (!std::isfinite(r))
+        return std::bit_cast<float>((std::bit_cast<uint32_t>(r) & 0x80000000u) | kFmax);
+    return r;
+}
+#define FPU_RSQRT_S(a, b) ps2_fpu_rsqrt((float)(a), (float)(b))
 #define FPU_ABS_S(a) fabsf((float)(a))
 #define FPU_MOV_S(a) ((float)(a))
 #define FPU_NEG_S(a) (-(float)(a))
@@ -839,6 +852,17 @@ static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
                                                                           \
             Ps2SetGprLow64(ctx_ptr, reg_idx, _newVal);                    \
         }                                                                 \
+    } while (0)
+
+// LBU/LHU/LWU zero-extend: promotes via uint32_t so the sign bit is never propagated.
+#define SET_GPR_ZE32(ctx_ptr, reg_idx, val)                                \
+    do                                                                     \
+    {                                                                      \
+        if ((reg_idx) != 0)                                                \
+        {                                                                  \
+            __m128i _newVal = _mm_cvtsi64_si128((int64_t)(uint32_t)(val)); \
+            Ps2SetGprLow64(ctx_ptr, reg_idx, _newVal);                     \
+        }                                                                  \
     } while (0)
 
 #define SET_GPR_S32(ctx_ptr, reg_idx, val)                                \
