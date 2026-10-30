@@ -1,0 +1,443 @@
+diff --git a/src/config.h b/src/config.h
+index e3749c5..5ba03dc 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -57,7 +57,7 @@
+ // Use busy wait loop for timing sync, if not defined, a high-resolution timer is set up and used
+ //#define SUPPORT_BUSY_WAIT_LOOP          1
+ // Use a partial-busy wait loop, in this case frame sleeps for most of the time, but then runs a busy loop at the end for accuracy
+-#define SUPPORT_PARTIALBUSY_WAIT_LOOP    1
++//#define SUPPORT_PARTIALBUSY_WAIT_LOOP  1   // [ps2x] the 5%-of-slack busy loop burns ~0.8 ms/frame of a core (measured [frameprof]); sleep the whole wait instead
+ // Allow automatic screen capture of current screen pressing F12, defined in KeyCallback()
+ #define SUPPORT_SCREEN_CAPTURE          1
+ // Allow automatic gif recording of current screen pressing CTRL+F12, defined in KeyCallback()
+@@ -79,7 +79,7 @@
+ 
+ #define MAX_KEYBOARD_KEYS             512       // Maximum number of keyboard keys supported
+ #define MAX_MOUSE_BUTTONS               8       // Maximum number of mouse buttons supported
+-#define MAX_GAMEPADS                    4       // Maximum number of gamepads supported
++#define MAX_GAMEPADS                   16       // Maximum number of gamepads supported
+ #define MAX_GAMEPAD_AXIS                8       // Maximum number of axis supported (per gamepad)
+ #define MAX_GAMEPAD_BUTTONS            32       // Maximum number of buttons supported (per gamepad)
+ #define MAX_GAMEPAD_VIBRATION_TIME      2.0f    // Maximum vibration time in seconds
+@@ -103,9 +103,9 @@
+ 
+ #define RL_SUPPORT_MESH_GPU_SKINNING           1      // GPU skinning, comment if your GPU does not support more than 8 VBOs
+ 
+-//#define RL_DEFAULT_BATCH_BUFFER_ELEMENTS    4096    // Default internal render batch elements limits
+-#define RL_DEFAULT_BATCH_BUFFERS               1      // Default number of batch buffers (multi-buffering)
+-#define RL_DEFAULT_BATCH_DRAWCALLS           256      // Default number of batch draw calls (by state changes: mode, texture)
++#define RL_DEFAULT_BATCH_BUFFER_ELEMENTS    16384    // Default internal render batch elements limits
++#define RL_DEFAULT_BATCH_BUFFERS               4      // Default number of batch buffers (multi-buffering)
++#define RL_DEFAULT_BATCH_DRAWCALLS           512      // Default number of batch draw calls (by state changes: mode, texture)
+ #define RL_DEFAULT_BATCH_MAX_TEXTURE_UNITS     4      // Maximum number of textures units that can be activated on batch drawing (SetShaderValueTexture())
+ 
+ #define RL_MAX_MATRIX_STACK_SIZE              32      // Maximum size of internal Matrix stack
+diff --git a/src/rlgl.h b/src/rlgl.h
+index 756656e..99e5ccc 100644
+--- a/src/rlgl.h
++++ b/src/rlgl.h
+@@ -213,7 +213,7 @@
+     #endif
+ #endif
+ #ifndef RL_DEFAULT_BATCH_BUFFERS
+-    #define RL_DEFAULT_BATCH_BUFFERS                 1      // Default number of batch buffers (multi-buffering)
++    #define RL_DEFAULT_BATCH_BUFFERS                 4      // Default number of batch buffers (multi-buffering)
+ #endif
+ #ifndef RL_DEFAULT_BATCH_DRAWCALLS
+     #define RL_DEFAULT_BATCH_DRAWCALLS             256      // Default number of batch draw calls (by state changes: mode, texture)
+@@ -2721,6 +2721,10 @@ int *rlGetShaderLocsDefault(void)
+ // Render batch management
+ //------------------------------------------------------------------------------------------------
+ // Load render batch
++#if defined(GRAPHICS_API_OPENGL_33)
++static void rlVbRingInit(int bufferElements);   /* [ps2x vbring] defined below */
++#endif
++void ps2xRlglVbRingForget(unsigned int prog);
+ rlRenderBatch rlLoadRenderBatch(int numBuffers, int bufferElements)
+ {
+     rlRenderBatch batch = { 0 };
+@@ -2822,6 +2826,9 @@ rlRenderBatch rlLoadRenderBatch(int numBuffers, int bufferElements)
+ #endif
+     }
+ 
++#if defined(GRAPHICS_API_OPENGL_33)
++    rlVbRingInit(bufferElements);   /* [ps2x vbring] */
++#endif
+     TRACELOG(RL_LOG_INFO, "RLGL: Render batch vertex buffers loaded successfully in VRAM (GPU)");
+ 
+     // Unbind the current VAO
+@@ -2901,36 +2908,279 @@ void rlUnloadRenderBatch(rlRenderBatch batch)
+ 
+ // Draw render batch
+ // NOTE: We require a pointer to reset batch and increase current buffer (multi-buffer)
++unsigned long long g_rlglDrawCalls = 0, g_rlglBatchFlushes = 0;   /* [ps2x glcalls] read by the runtime fps line */
++double g_rlglFlushNs = 0.0;   /* [ps2x flushtime] wall ns spent inside non-empty rlDrawRenderBatch calls */
++
++/* [ps2x vbring] persistent-mapped vertex ring. Every rlgl flush used to upload its vertices with four
++   glBufferSubData calls into a 4-deep buffer ring (driver-side copy + rename + a DMA before the draw) and then
++   re-send the MVP matrix and the two constant uniforms. With ~3000 flushes/frame that fixed per-flush work was
++   ~80 GPU ms/s + ~2.5 CPU us/flush on the fast box and dominated the low-end machines. Here the CPU-side batch
++   arrays are memcpy'd straight into a persistently mapped (GL_MAP_PERSISTENT|COHERENT) ring, the draws index
++   the ring at the cursor, and a fence per ring segment keeps us from overwriting data the GPU still reads.
++   Uniforms are re-sent only when the program or the matrix changed. Needs GL_ARB_buffer_storage (GL 4.4);
++   without it, or with PS2X_VBRING=0, the original SubData path runs unchanged.
++   PS2X_VBRING=N sets the ring size in vertices; PS2X_VBRING_NOCACHE bit 1 = always re-send the MVP, bit 2 = always
++   re-send the constants (both were measured harmless on this box; kept as switches). */
++#if !defined(RL_VBRING_VERTS)
++    #define RL_VBRING_VERTS   (1 << 19)     /* 524288 vertices = 8 full batches, ~10 fight frames */
++#endif
++#define RL_VBRING_SEGS  4
++typedef struct rlVbRing {
++    int on, tried, persistent;
++    unsigned int vao, vbo[4], ibo;
++    unsigned char *map[4];
++    int ringVerts, segVerts, cursor, curSeg, lastFencedSeg;
++    void *fence[RL_VBRING_SEGS];
++    unsigned int mvpProg[16]; float mvp[16][16]; int mvpN;   /* per-program cache of the last uploaded MVP */
++    unsigned int constProg[16]; int constN;                   /* programs that already got colDiffuse/texture0 */
++} rlVbRing;
++static rlVbRing g_vbr = { 0 };
++static int g_vbrNoCache = -1;
++static int rlVbRingNoCache(void) { if (g_vbrNoCache < 0) { const char *e = getenv("PS2X_VBRING_NOCACHE"); g_vbrNoCache = e ? atoi(e) : 0; } return g_vbrNoCache; }
++unsigned long long g_rlglVbRingWaits = 0, g_rlglVbRingWraps = 0, g_rlglVbRingBytes = 0, g_rlglVbRingMvpSkips = 0;   /* read by the runtime */
++int g_rlglVbRingOn = 0;
++
++#if defined(GRAPHICS_API_OPENGL_33)
++static void rlVbRingInit(int bufferElements)
++{
++    if (g_vbr.tried) return;
++    g_vbr.tried = 1;
++    const char *env = getenv("PS2X_VBRING");
++    if (env && env[0] == '0') { TRACELOG(RL_LOG_INFO, "RLGL: [vbring] disabled by PS2X_VBRING=0"); return; }
++    if (!RLGL.ExtSupported.vao || !glMapBufferRange || !glFenceSync || !glClientWaitSync || !glDeleteSync
++#if !defined(__APPLE__)
++        || !glBufferStorage
++#endif
++       )
++    {
++        TRACELOG(RL_LOG_INFO, "RLGL: [vbring] not available (vao=%d bufferStorage=%d) - SubData path", RLGL.ExtSupported.vao, glBufferStorage != NULL);
++        return;
++    }
++    int ringVerts = RL_VBRING_VERTS;
++    if (env && env[0] != '0' && atoi(env) > 1) ringVerts = atoi(env);
++    ringVerts = (ringVerts + 3) & ~3;
++    const int maxBatchVerts = bufferElements*4;
++    if (ringVerts < maxBatchVerts*RL_VBRING_SEGS) ringVerts = maxBatchVerts*RL_VBRING_SEGS;
++    ringVerts = (ringVerts/RL_VBRING_SEGS + 3) & ~3;   /* segment size, 4-aligned */
++    g_vbr.segVerts = ringVerts;
++    g_vbr.ringVerts = ringVerts*RL_VBRING_SEGS;
++
++    g_vbr.persistent = (glBufferStorage != NULL);
++    const unsigned int flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
++    const size_t bytes[4] = { (size_t)g_vbr.ringVerts*3*sizeof(float), (size_t)g_vbr.ringVerts*2*sizeof(float),
++                              (size_t)g_vbr.ringVerts*3*sizeof(float), (size_t)g_vbr.ringVerts*4 };
++    const int locs[4] = { RLGL.State.currentShaderLocs[RL_SHADER_LOC_VERTEX_POSITION], RLGL.State.currentShaderLocs[RL_SHADER_LOC_VERTEX_TEXCOORD01],
++                          RLGL.State.currentShaderLocs[RL_SHADER_LOC_VERTEX_NORMAL], RLGL.State.currentShaderLocs[RL_SHADER_LOC_VERTEX_COLOR] };
++    while (glGetError() != GL_NO_ERROR) { }
++    glGenVertexArrays(1, &g_vbr.vao);
++    glBindVertexArray(g_vbr.vao);
++    int ok = 1;
++    for (int k = 0; k < 4; k++)
++    {
++        glGenBuffers(1, &g_vbr.vbo[k]);
++        glBindBuffer(GL_ARRAY_BUFFER, g_vbr.vbo[k]);
++        if (g_vbr.persistent)
++        {
++            glBufferStorage(GL_ARRAY_BUFFER, (GLsizeiptr)bytes[k], NULL, flags);
++            g_vbr.map[k] = (unsigned char *)glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)bytes[k], flags);
++            if (!g_vbr.map[k] || glGetError() != GL_NO_ERROR) { ok = 0; break; }
++        }
++        else
++        {
++            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)bytes[k], NULL, GL_STREAM_DRAW);
++            if (glGetError() != GL_NO_ERROR) { ok = 0; break; }
++        }
++        glEnableVertexAttribArray(locs[k]);
++        if (k == 3) glVertexAttribPointer(locs[k], 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, 0);
++        else glVertexAttribPointer(locs[k], (k == 1)? 2 : 3, GL_FLOAT, 0, 0, 0);
++    }
++    if (ok)
++    {
++        /* one quad index pattern over the whole ring: quads at ring vertex 4q use indices 6q.. */
++        const size_t quads = (size_t)g_vbr.ringVerts/4;
++        unsigned int *idx = (unsigned int *)RL_MALLOC(quads*6*sizeof(unsigned int));
++        for (size_t q = 0; q < quads; q++)
++        {
++            const unsigned int b = (unsigned int)(q*4);
++            idx[q*6 + 0] = b; idx[q*6 + 1] = b + 1; idx[q*6 + 2] = b + 2;
++            idx[q*6 + 3] = b; idx[q*6 + 4] = b + 2; idx[q*6 + 5] = b + 3;
++        }
++        glGenBuffers(1, &g_vbr.ibo);
++        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_vbr.ibo);
++        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(quads*6*sizeof(unsigned int)), idx, GL_STATIC_DRAW);
++        RL_FREE(idx);
++        if (glGetError() != GL_NO_ERROR) ok = 0;
++    }
++    glBindVertexArray(0);
++    glBindBuffer(GL_ARRAY_BUFFER, 0);
++    if (!ok)
++    {
++        TRACELOG(RL_LOG_WARNING, "RLGL: [vbring] setup failed - SubData path");
++        return;
++    }
++    g_vbr.cursor = 0; g_vbr.curSeg = 0; g_vbr.lastFencedSeg = -1;
++    g_vbr.on = 1; g_rlglVbRingOn = 1;
++    TRACELOG(RL_LOG_INFO, "RLGL: [vbring] %s vertex ring on: %d vertices (%d segments of %d), %.1f MB",
++             g_vbr.persistent ? "persistent" : "mapped", g_vbr.ringVerts, RL_VBRING_SEGS, g_vbr.segVerts,
++             (bytes[0] + bytes[1] + bytes[2] + bytes[3])/1048576.0);
++}
++
++/* fence every segment written since the last fence, then wait for the fence of each segment we are about to reuse */
++static void rlVbRingFenceAndWait(int segStart, int segEnd)
++{
++    if (segStart != g_vbr.curSeg)
++    {
++        /* all draws that read segments (lastFencedSeg, curSeg] were issued before this call */
++        int s = (g_vbr.lastFencedSeg + 1) % RL_VBRING_SEGS;
++        for (int guard = 0; guard < RL_VBRING_SEGS; guard++)
++        {
++            if (g_vbr.fence[s]) glDeleteSync((GLsync)g_vbr.fence[s]);
++            g_vbr.fence[s] = (void *)glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++            if (s == g_vbr.curSeg) break;
++            s = (s + 1) % RL_VBRING_SEGS;
++        }
++        g_vbr.lastFencedSeg = g_vbr.curSeg;
++    }
++    for (int s = segStart; s <= segEnd; s++)
++    {
++        if (!g_vbr.fence[s]) continue;
++        const unsigned int r = glClientWaitSync((GLsync)g_vbr.fence[s], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
++        if (r != GL_ALREADY_SIGNALED) g_rlglVbRingWaits++;
++        glDeleteSync((GLsync)g_vbr.fence[s]);
++        g_vbr.fence[s] = NULL;
++    }
++    g_vbr.curSeg = segEnd;
++}
++
++/* copy the batch's CPU arrays into the ring; returns the ring base vertex of this batch */
++static int rlVbRingUpload(rlRenderBatch *batch)
++{
++    const int n = RLGL.State.vertexCounter;
++    const int nAligned = (n + 3) & ~3;
++    if (g_vbr.cursor + nAligned > g_vbr.ringVerts) { g_vbr.cursor = 0; g_rlglVbRingWraps++; }
++    const int base = g_vbr.cursor;
++    rlVbRingFenceAndWait(base/g_vbr.segVerts, (base + nAligned - 1)/g_vbr.segVerts);
++    const rlVertexBuffer *vb = &batch->vertexBuffer[batch->currentBuffer];
++    const size_t offsets[4] = { (size_t)base*3*sizeof(float), (size_t)base*2*sizeof(float),
++                                (size_t)base*3*sizeof(float), (size_t)base*4 };
++    const size_t lengths[4] = { (size_t)n*3*sizeof(float), (size_t)n*2*sizeof(float),
++                                (size_t)n*3*sizeof(float), (size_t)n*4 };
++    const void *sources[4] = { vb->vertices, vb->texcoords, vb->normals, vb->colors };
++    for (int k = 0; k < 4; k++)
++    {
++        if (g_vbr.persistent) memcpy(g_vbr.map[k] + offsets[k], sources[k], lengths[k]);
++        else
++        {
++            glBindBuffer(GL_ARRAY_BUFFER, g_vbr.vbo[k]);
++            void *dst = glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)offsets[k], (GLsizeiptr)lengths[k],
++                                         GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
++            if (!dst) return -1;
++            memcpy(dst, sources[k], lengths[k]);
++            glUnmapBuffer(GL_ARRAY_BUFFER);
++        }
++    }
++    g_rlglVbRingBytes += (unsigned long long)n*36;
++    g_vbr.cursor = base + nAligned;
++    return base;
++}
++
++/* returns 1 when the MVP for this program must be (re)sent */
++static int rlVbRingMvpDirty(unsigned int prog, const float *m)
++{
++    if (rlVbRingNoCache() & 1) return 1;
++    for (int i = 0; i < g_vbr.mvpN; i++)
++    {
++        if (g_vbr.mvpProg[i] != prog) continue;
++        if (memcmp(g_vbr.mvp[i], m, 16*sizeof(float)) == 0) { g_rlglVbRingMvpSkips++; return 0; }
++        memcpy(g_vbr.mvp[i], m, 16*sizeof(float));
++        return 1;
++    }
++    if (g_vbr.mvpN < 16) { g_vbr.mvpProg[g_vbr.mvpN] = prog; memcpy(g_vbr.mvp[g_vbr.mvpN], m, 16*sizeof(float)); g_vbr.mvpN++; }
++    return 1;
++}
++static int rlVbRingConstDirty(unsigned int prog)
++{
++    if (rlVbRingNoCache() & 2) return 1;
++    for (int i = 0; i < g_vbr.constN; i++) if (g_vbr.constProg[i] == prog) return 0;
++    if (g_vbr.constN < 16) g_vbr.constProg[g_vbr.constN++] = prog;
++    return 1;
++}
++/* a (re)linked or deleted program has fresh uniforms: drop it from both caches (rlLoadShaderProgram / rlUnloadShaderProgram call this) */
++void ps2xRlglVbRingForget(unsigned int prog)
++{
++    for (int i = 0; i < g_vbr.mvpN; i++) if (g_vbr.mvpProg[i] == prog) g_vbr.mvpProg[i] = 0;
++    for (int i = 0; i < g_vbr.constN; i++) if (g_vbr.constProg[i] == prog) g_vbr.constProg[i] = 0;
++}
++#endif
++#include <time.h>
++#if defined(_WIN32)
++static inline double ps2xRlglNowNs(void) { struct timespec ts; timespec_get(&ts, TIME_UTC); return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec; }   /* UCRT: no clock_gettime */
++#else
++static inline double ps2xRlglNowNs(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec; }
++#endif
++static void rlDrawRenderBatchInner(rlRenderBatch *batch);
+ void rlDrawRenderBatch(rlRenderBatch *batch)
++{
++    if (RLGL.State.vertexCounter > 0)
++    {
++        g_rlglBatchFlushes++;
++        const double t0 = ps2xRlglNowNs();
++        rlDrawRenderBatchInner(batch);
++        g_rlglFlushNs += ps2xRlglNowNs() - t0;
++        return;
++    }
++    rlDrawRenderBatchInner(batch);
++}
++static void rlDrawRenderBatchInner(rlRenderBatch *batch)
+ {
+ #if defined(GRAPHICS_API_OPENGL_33) || defined(GRAPHICS_API_OPENGL_ES2)
+     // Update batch vertex buffers
+     //------------------------------------------------------------------------------------------------------------
+     // NOTE: If there is not vertex data, buffers doesn't need to be updated (vertexCount > 0)
+     // TODO: If no data changed on the CPU arrays --> No need to re-update GPU arrays (use a change detector flag?)
+-    if (RLGL.State.vertexCounter > 0)
++    int vbrBase = -1;   /* [ps2x vbring] ring base vertex of this batch, -1 = SubData path */
++#if defined(GRAPHICS_API_OPENGL_33)
++    if ((RLGL.State.vertexCounter > 0) && g_vbr.on) vbrBase = rlVbRingUpload(batch);
++#endif
++    if ((RLGL.State.vertexCounter > 0) && (vbrBase < 0))
+     {
+         // Activate elements VAO
+         if (RLGL.ExtSupported.vao) glBindVertexArray(batch->vertexBuffer[batch->currentBuffer].vaoId);
+ 
+         // Vertex positions buffer
+         glBindBuffer(GL_ARRAY_BUFFER, batch->vertexBuffer[batch->currentBuffer].vboId[0]);
++#if defined(__APPLE__)
++        glBufferData(GL_ARRAY_BUFFER, RLGL.State.vertexCounter*3*sizeof(float), batch->vertexBuffer[batch->currentBuffer].vertices, GL_STREAM_DRAW);
++#else
+         glBufferSubData(GL_ARRAY_BUFFER, 0, RLGL.State.vertexCounter*3*sizeof(float), batch->vertexBuffer[batch->currentBuffer].vertices);
++#endif
+         //glBufferData(GL_ARRAY_BUFFER, sizeof(float)*3*4*batch->vertexBuffer[batch->currentBuffer].elementCount, batch->vertexBuffer[batch->currentBuffer].vertices, GL_DYNAMIC_DRAW);  // Update all buffer
+ 
+         // Texture coordinates buffer
+         glBindBuffer(GL_ARRAY_BUFFER, batch->vertexBuffer[batch->currentBuffer].vboId[1]);
++#if defined(__APPLE__)
++        glBufferData(GL_ARRAY_BUFFER, RLGL.State.vertexCounter*2*sizeof(float), batch->vertexBuffer[batch->currentBuffer].texcoords, GL_STREAM_DRAW);
++#else
+         glBufferSubData(GL_ARRAY_BUFFER, 0, RLGL.State.vertexCounter*2*sizeof(float), batch->vertexBuffer[batch->currentBuffer].texcoords);
++#endif
+         //glBufferData(GL_ARRAY_BUFFER, sizeof(float)*2*4*batch->vertexBuffer[batch->currentBuffer].elementCount, batch->vertexBuffer[batch->currentBuffer].texcoords, GL_DYNAMIC_DRAW); // Update all buffer
+ 
+         // Normals buffer
+         glBindBuffer(GL_ARRAY_BUFFER, batch->vertexBuffer[batch->currentBuffer].vboId[2]);
++#if defined(__APPLE__)
++        glBufferData(GL_ARRAY_BUFFER, RLGL.State.vertexCounter*3*sizeof(float), batch->vertexBuffer[batch->currentBuffer].normals, GL_STREAM_DRAW);
++#else
+         glBufferSubData(GL_ARRAY_BUFFER, 0, RLGL.State.vertexCounter*3*sizeof(float), batch->vertexBuffer[batch->currentBuffer].normals);
++#endif
+         //glBufferData(GL_ARRAY_BUFFER, sizeof(float)*3*4*batch->vertexBuffer[batch->currentBuffer].elementCount, batch->vertexBuffer[batch->currentBuffer].normals, GL_DYNAMIC_DRAW); // Update all buffer
+ 
+         // Colors buffer
+         glBindBuffer(GL_ARRAY_BUFFER, batch->vertexBuffer[batch->currentBuffer].vboId[3]);
++#if defined(__APPLE__)
++        glBufferData(GL_ARRAY_BUFFER, RLGL.State.vertexCounter*4*sizeof(unsigned char), batch->vertexBuffer[batch->currentBuffer].colors, GL_STREAM_DRAW);
++#else
+         glBufferSubData(GL_ARRAY_BUFFER, 0, RLGL.State.vertexCounter*4*sizeof(unsigned char), batch->vertexBuffer[batch->currentBuffer].colors);
++#endif
+         //glBufferData(GL_ARRAY_BUFFER, sizeof(float)*4*4*batch->vertexBuffer[batch->currentBuffer].elementCount, batch->vertexBuffer[batch->currentBuffer].colors, GL_DYNAMIC_DRAW);    // Update all buffer
+ 
+         // NOTE: glMapBuffer() causes sync issue
+@@ -2982,6 +3232,10 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
+ 
+             // Create modelview-projection matrix and upload to shader
+             Matrix matMVP = rlMatrixMultiply(RLGL.State.modelview, RLGL.State.projection);
++#if defined(GRAPHICS_API_OPENGL_33)
++            /* [ps2x vbring] a program keeps its uniforms: re-send the MVP only when it changed for this program */
++            if (!g_vbr.on || rlVbRingMvpDirty(RLGL.State.currentShaderId, rlMatrixToFloat(matMVP)))
++#endif
+             glUniformMatrix4fv(RLGL.State.currentShaderLocs[RL_SHADER_LOC_MATRIX_MVP], 1, false, rlMatrixToFloat(matMVP));
+ 
+             if (RLGL.State.currentShaderLocs[RL_SHADER_LOC_MATRIX_PROJECTION] != -1)
+@@ -3007,7 +3261,8 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
+                 glUniformMatrix4fv(RLGL.State.currentShaderLocs[RL_SHADER_LOC_MATRIX_NORMAL], 1, false, rlMatrixToFloat(rlMatrixTranspose(rlMatrixInvert(RLGL.State.transform))));
+             }
+ 
+-            if (RLGL.ExtSupported.vao) glBindVertexArray(batch->vertexBuffer[batch->currentBuffer].vaoId);
++            if (vbrBase >= 0) glBindVertexArray(g_vbr.vao);   /* [ps2x vbring] */
++            else if (RLGL.ExtSupported.vao) glBindVertexArray(batch->vertexBuffer[batch->currentBuffer].vaoId);
+             else
+             {
+                 // Bind vertex attrib: position (shader-location = 0)
+@@ -3034,8 +3289,13 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
+             }
+ 
+             // Setup some default shader values
++#if defined(GRAPHICS_API_OPENGL_33)
++            if (!g_vbr.on || rlVbRingConstDirty(RLGL.State.currentShaderId))   /* [ps2x vbring] constants: once per program */
++#endif
++            {
+             glUniform4f(RLGL.State.currentShaderLocs[RL_SHADER_LOC_COLOR_DIFFUSE], 1.0f, 1.0f, 1.0f, 1.0f);
+             glUniform1i(RLGL.State.currentShaderLocs[RL_SHADER_LOC_MAP_DIFFUSE], 0);  // Active default sampler2D: texture0
++            }
+ 
+             // Activate additional sampler textures
+             // Those additional textures will be common for all draw calls of the batch
+@@ -3052,11 +3312,12 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
+             // NOTE: Batch system accumulates calls by texture0 changes, additional textures are enabled for all the draw calls
+             glActiveTexture(GL_TEXTURE0);
+ 
+-            for (int i = 0, vertexOffset = 0; i < batch->drawCounter; i++)
++            for (int i = 0, vertexOffset = (vbrBase > 0)? vbrBase : 0; i < batch->drawCounter; i++)   /* [ps2x vbring] draws index the ring */
+             {
+                 // Bind current draw call texture, activated as GL_TEXTURE0 and Bound to sampler2D texture0 by default
+                 glBindTexture(GL_TEXTURE_2D, batch->draws[i].textureId);
+ 
++                g_rlglDrawCalls++;   /* [ps2x glcalls] one driver draw per batch entry */
+                 if ((batch->draws[i].mode == RL_LINES) || (batch->draws[i].mode == RL_TRIANGLES)) glDrawArrays(batch->draws[i].mode, vertexOffset, batch->draws[i].vertexCount);
+                 else
+                 {
+@@ -3080,12 +3341,20 @@ void rlDrawRenderBatch(rlRenderBatch *batch)
+                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+             }
+ 
+-            glBindTexture(GL_TEXTURE_2D, 0);    // Unbind textures
++            /* [ps2x lean flush] per-flush unbinds (texture, VAO, program) are pure driver overhead: every flush
++
++               re-binds all three at its start. Define RLGL_PS2X_UNBIND to restore them. */
++#if defined(RLGL_PS2X_UNBIND)
++
++            glBindTexture(GL_TEXTURE_2D, 0);
++#endif
+         }
++#if defined(RLGL_PS2X_UNBIND)
+ 
+-        if (RLGL.ExtSupported.vao) glBindVertexArray(0); // Unbind VAO
++        if (RLGL.ExtSupported.vao) glBindVertexArray(0);
+ 
+-        glUseProgram(0);    // Unbind shader program
++        glUseProgram(0);
++#endif
+     }
+ 
+     // Restore viewport to default measures
+@@ -4259,6 +4528,9 @@ unsigned int rlLoadShaderProgram(unsigned int vShaderId, unsigned int fShaderId)
+ 
+         TRACELOG(RL_LOG_INFO, "SHADER: [ID %i] Program shader loaded successfully", program);
+     }
++#endif
++#if defined(GRAPHICS_API_OPENGL_33)
++    ps2xRlglVbRingForget(program);   /* [ps2x vbring] a fresh program (possibly a reused id) has zero uniforms */
+ #endif
+     return program;
+ }
+@@ -4268,6 +4540,9 @@ void rlUnloadShaderProgram(unsigned int id)
+ {
+ #if defined(GRAPHICS_API_OPENGL_33) || defined(GRAPHICS_API_OPENGL_ES2)
+     glDeleteProgram(id);
++#if defined(GRAPHICS_API_OPENGL_33)
++    ps2xRlglVbRingForget(id);   /* [ps2x vbring] */
++#endif
+ 
+     TRACELOG(RL_LOG_INFO, "SHADER: [ID %i] Unloaded shader program data from VRAM (GPU)", id);
+ #endif

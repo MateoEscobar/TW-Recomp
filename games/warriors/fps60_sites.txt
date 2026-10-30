@@ -1,0 +1,3 @@
+# fps60_sites.txt — Patch addresses for 60fps mode (TWR-23).
+# Format: 0xADDRESS f
+# Populated in TWR-23 after ELF analysis.
