@@ -43,15 +43,17 @@ if(WIN32)
 endif()
 
 # ---- Subcomponents ----
-# Guards check for the actual CMakeLists.txt so cmake -B build succeeds even
-# when a component directory is still a placeholder (before TWR-8 adds them).
+# ps2xRecomp is a git submodule of the full PS2Recomp repo.
+# Only the recompiler tool lives at ps2xRecomp/ps2xRecomp/ — we do NOT
+# add_subdirectory the repo root (it brings its own ps2xRuntime/ps2xAnalyzer
+# which conflict with our adapted copies and require FFmpeg at configure time).
 
 option(TW_BUILD_RECOMP   "Build ps2xRecomp"   ON)
 option(TW_BUILD_RUNTIME  "Build ps2xRuntime"  ON)
 option(TW_BUILD_ANALYZER "Build ps2xAnalyzer" ON)
 
-if(TW_BUILD_RECOMP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ps2xRecomp/CMakeLists.txt")
-    add_subdirectory("ps2xRecomp")
+if(TW_BUILD_RECOMP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ps2xRecomp/ps2xRecomp/CMakeLists.txt")
+    add_subdirectory("ps2xRecomp/ps2xRecomp")
 endif()
 
 if(TW_BUILD_RUNTIME AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ps2xRuntime/CMakeLists.txt")
