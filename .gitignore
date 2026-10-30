@@ -9,6 +9,7 @@ games/warriors/recomp_out/
 
 # Game assets extracted from ISO — NEVER commit game data
 games/warriors/assets/
+games/warriors/SLUS_*
 games/warriors/*.iso
 games/warriors/*.img
 *.iso
