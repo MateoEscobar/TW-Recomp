@@ -40,7 +40,7 @@ Todas están en la sección `stubs` o `untracked_stubs` de `warriors.toml`.
 |-----------|-------------|
 | `sceCd*` | CD/DVD (sceCdInit, sceCdSyncS, sceCdMmode, sceCdReadClock) |
 | `sceDma*` | DMA controller (sceDmaSend, sceDmaPause, sceDmaReset, etc.) |
-| `sceGs*` | Graphics Synthesizer (scePutDispEnv, scePutDrawEnv, sceGsResetGraph) |
+| `sceGs*` | Graphics Synthesizer (sceGsPutDispEnv, sceGsPutDrawEnv, sceGsResetGraph) |
 | `sceSif*` | SIF bus IOP←→EE (sceSifInitCmd, sceSifCallRpc, sceSifBindRpc) |
 | `sceFs*` / `sceFsSifCallRpc` | File system |
 | `sceDeci2*` | Debug interface (DECI2 protocol) |

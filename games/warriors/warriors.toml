@@ -12,7 +12,7 @@ ghidra_output = ""
 output = "games/warriors/output/"
 
 # Single file output mode (recommended for large games)
-single_file_output = false
+single_file_output = true
 
 # Patch policy (instruction-driven handling is preferred for syscalls)
 patch_syscalls = false
