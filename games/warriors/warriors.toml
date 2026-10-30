@@ -8,11 +8,12 @@ input = "games/warriors/SLUS_212.15"
 # Path to Ghidra exported function map (optional CSV)
 ghidra_output = ""
 
-# Path to output directory
-output = "games/warriors/output/"
+# Path to output directory — must match CMake's RUNNER_SRC_FILES glob (ps2xRuntime/src/runner/)
+output = "ps2xRuntime/src/runner/"
 
-# Single file output mode (recommended for large games)
-single_file_output = true
+# Single file output disabled — con true el .h no declara los ~590k entry points
+# adicionales y register_functions.cpp falla con "not declared in this scope".
+single_file_output = false
 
 # Patch policy (instruction-driven handling is preferred for syscalls)
 patch_syscalls = false
