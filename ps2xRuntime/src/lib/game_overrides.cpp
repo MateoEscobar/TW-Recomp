@@ -8320,6 +8320,26 @@ namespace
     // is the infinite-loading freeze, and the CD read-state guard is a load-time edge case.
     PS2_REGISTER_GAME_OVERRIDE("Warriors NULL packet-list guard", "BOOT", 0u, 0u, &applyBt3NullPacketGuard);
     PS2_REGISTER_GAME_OVERRIDE("Warriors CD read-state edge guard", "BOOT", 0u, 0u, &applyBt3CdStateEdge);
+
+    // ─── The Warriors (SLUS_212.15) ──────────────────────────────────────────────
+    //
+    // Boot hang: sub_00339A20 (0x339a20–0x339a58) dispatches through a vtable
+    // pointer loaded as *(*(a0+0x20)+0x54).  The pointer is null because BFW.SND
+    // (Miles Sound System IOP module) is not implemented in this runtime version —
+    // SifLoadModule tracks the load but never populates the module object.
+    //
+    // With policy=1 the JALR to target=0x0 does not crash, but the caller loops
+    // back and the game never advances past GAME=0 / gframe=0.  Binding
+    // sub_00339A20 to ret0 lets the MSS initialisation path fail gracefully and
+    // the boot sequence continues.  Full MSS/audio support is tracked in TWR-17.
+
+    void applyTwWarriorsBootBypass(PS2Runtime &runtime)
+    {
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00339A20u, "ret0"))
+            std::cerr << "[game_overrides] TW Warriors: IOP/MSS boot bypass on sub_339A20 (0x339a20)" << std::endl;
+    }
+
+    PS2_REGISTER_GAME_OVERRIDE("TW Warriors IOP boot bypass", "SLUS_212.15", 0u, 0u, &applyTwWarriorsBootBypass)
 }
 
 // [netmenu] Play one of the game's OWN SEs (system bank A) from the host menu -- no decoded WAVs.
