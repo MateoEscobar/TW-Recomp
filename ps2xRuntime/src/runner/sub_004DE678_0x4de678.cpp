@@ -1,0 +1,116 @@
+#include <stdexcept>
+#include "ps2_runtime_macros.h"
+#include "ps2_runtime.h"
+#include <ps2_recompiled_functions.h>
+#include <ps2_recompiled_stubs.h>
+
+#include "ps2_syscalls.h"
+#include "ps2_stubs.h"
+
+#ifdef PS2_FUNCTION_LOG_TRACKER
+#include "ps2_log.h"
+#endif
+
+// Function: sub_004DE678
+// Address: 0x4de678 - 0x4de6c8
+void sub_004DE678_0x4de678(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {
+#ifdef PS2_FUNCTION_LOG_TRACKER
+    PS_LOG_ENTRY("sub_004DE678_0x4de678");
+#endif
+
+    switch (ctx->pc) {
+        case 0x4de69cu: goto label_4de69c;
+        default: break;
+    }
+
+    ctx->pc = 0x4de678u;
+
+    // 0x4de678: 0x3c020053  lui         $v0, 0x53
+    ctx->pc = 0x4de678u;
+    SET_GPR_S32(ctx, 2, (int32_t)((uint32_t)83 << 16));
+    // 0x4de67c: 0x27bdfff0  addiu       $sp, $sp, -0x10
+    ctx->pc = 0x4de67cu;
+    SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 4294967280));
+    // 0x4de680: 0x24424298  addiu       $v0, $v0, 0x4298
+    ctx->pc = 0x4de680u;
+    SET_GPR_S32(ctx, 2, (int32_t)ADD32(GPR_U32(ctx, 2), 17048));
+    // 0x4de684: 0xffbf0000  sd          $ra, 0x0($sp)
+    ctx->pc = 0x4de684u;
+    WRITE64(ADD32(GPR_U32(ctx, 29), 0), GPR_U64(ctx, 31));
+    // 0x4de688: 0x30a50001  andi        $a1, $a1, 0x1
+    ctx->pc = 0x4de688u;
+    SET_GPR_U64(ctx, 5, GPR_U64(ctx, 5) & (uint64_t)(uint16_t)1);
+    // 0x4de68c: 0x10a00003  beqz        $a1, . + 4 + (0x3 << 2)
+    ctx->pc = 0x4DE68Cu;
+    {
+        const bool branch_taken_0x4de68c = (GPR_U64(ctx, 5) == GPR_U64(ctx, 0));
+        ctx->pc = 0x4DE690u;
+        ctx->in_delay_slot = true;
+        ctx->branch_pc = 0x4DE68Cu;
+        // 0x4de690: 0xac820000  sw          $v0, 0x0($a0) (Delay Slot)
+        WRITE32(ADD32(GPR_U32(ctx, 4), 0), GPR_U32(ctx, 2));
+        ctx->in_delay_slot = false;
+        if (branch_taken_0x4de68c) {
+            ctx->pc = 0x4DE69Cu;
+            goto label_4de69c;
+        }
+    }
+    ctx->pc = 0x4DE694u;
+    // 0x4de694: 0xc10b208  jal         func_42C820
+    ctx->pc = 0x4DE694u;
+    SET_GPR_U32(ctx, 31, 0x4DE69Cu);
+    ctx->pc = 0x42C820u;
+    if (!runtime->dispatchGuestBranch(rdram, ctx, 0x42C820u, 0x4DE694u, 0x4DE69Cu, PS2Runtime::GuestBranchKind::DirectCall, "JAL")) {
+        return;
+    }
+    ctx->pc = 0x4DE69Cu;
+label_4de69c:
+    // 0x4de69c: 0xdfbf0000  ld          $ra, 0x0($sp)
+    ctx->pc = 0x4de69cu;
+    SET_GPR_U64(ctx, 31, READ64(ADD32(GPR_U32(ctx, 29), 0)));
+    // 0x4de6a0: 0x3e00008  jr          $ra
+    ctx->pc = 0x4DE6A0u;
+    {
+        const uint32_t jumpTarget = GPR_U32(ctx, 31);
+        ctx->pc = 0x4DE6A4u;
+        ctx->in_delay_slot = true;
+        ctx->branch_pc = 0x4DE6A0u;
+        // 0x4de6a4: 0x27bd0010  addiu       $sp, $sp, 0x10 (Delay Slot)
+        SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 16));
+        ctx->in_delay_slot = false;
+        ctx->pc = jumpTarget;
+        #if defined(PS2X_STRICT_RETURN_DIAGNOSTICS) && PS2X_STRICT_RETURN_DIAGNOSTICS
+        (void)runtime->dispatchGuestBranch(rdram, ctx, jumpTarget, 0x4DE6A0u, 0u, PS2Runtime::GuestBranchKind::Return, "JR $ra");
+        return;
+        #else
+        ctx->pc = jumpTarget;
+        return;
+        #endif
+    }
+    ctx->pc = 0x4DE6A8u;
+    // 0x4de6a8: 0xc4400004  lwc1        $f0, 0x4($v0)
+    ctx->pc = 0x4de6a8u;
+    { uint32_t bits = READ32(ADD32(GPR_U32(ctx, 2), 4)); float f; std::memcpy(&f, &bits, sizeof(f)); ctx->f[0] = f; }
+    // 0x4de6ac: 0x0  nop
+    ctx->pc = 0x4de6acu;
+    // NOP
+    // 0x4de6b0: 0x24420008  addiu       $v0, $v0, 0x8
+    ctx->pc = 0x4de6b0u;
+    SET_GPR_S32(ctx, 2, (int32_t)ADD32(GPR_U32(ctx, 2), 8));
+    // 0x4de6b4: 0x0  nop
+    ctx->pc = 0x4de6b4u;
+    // NOP
+    // 0x4de6b8: 0x27bd0040  addiu       $sp, $sp, 0x40
+    ctx->pc = 0x4de6b8u;
+    SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 64));
+    // 0x4de6bc: 0x0  nop
+    ctx->pc = 0x4de6bcu;
+    // NOP
+    // 0x4de6c0: 0x27bd0040  addiu       $sp, $sp, 0x40
+    ctx->pc = 0x4de6c0u;
+    SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 64));
+    // 0x4de6c4: 0x0  nop
+    ctx->pc = 0x4de6c4u;
+    // NOP
+    ctx->pc = 0x4de6c8u;
+}
