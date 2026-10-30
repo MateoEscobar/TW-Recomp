@@ -1,0 +1,245 @@
+#pragma once
+
+#include "ps2_runtime.h"
+#include "runtime/pad_config.h"
+#include "runtime/ps2x_notify.h"     // [notify] NotifyKind, for the popup stack
+#include "runtime/ps2x_settings.h"   // EnvLock, for the keys the environment owns
+#include <string>
+#include <vector>
+#include <array>
+#include <cstdint>
+
+struct ImFont;
+
+class PS2SettingsOverlay
+{
+public:
+    struct Settings
+    {
+        // [netplay] The Netplay overlay: the corner label, the panel behind it and the automatic
+        // character-select transition with its curtain. The launcher's Misc page has the same switch
+        // and both read and write the same settings.toml key, so the two cannot disagree; see
+        // ps2x_settings::Settings::netOverlay, which is the same field on the front-end's side.
+        bool netOverlay = true;
+        // [ach] The local RetroAchievements tracker. Same relationship as netOverlay above: this
+        // switch and the launcher's Misc page write the same settings.toml key. See
+        // ps2x_settings::Settings::achievements.
+        bool achievements = true;
+        float masterVolume = 1.0f;
+        float musicVolume = 1.0f;
+        float sfxVolume = 0.4f;
+        bool gpuRenderer = true;
+        // [renderer] 0 = OpenGL (New: our own gfx::gl present), 1 = software rasterizer, 2 = paraLLEl-GS
+        // (Vulkan compute; only when the backend is built in), 3 = Direct3D 11 (native Windows present;
+        // RETIRED for now -- kept only so old settings can be migrated). gpuRenderer stays in sync
+        // (renderer != 1) for the code that still reads it.
+        static constexpr int kRendererOpenGL = 0, kRendererSoftware = 1, kRendererParallelGS = 2, kRendererD3D11 = 3, kRendererNative = 4;   // [nativeopt] 4 = the native Vulkan renderer at the engine seam (paraLLEl-GS device + PS2X_SEAMVK)
+#if defined(PS2X_HAVE_PGS) && !defined(_WIN32)
+        static constexpr int kRendererDefault = 2;   // [pgs] Vulkan compute backend
+#else
+        static constexpr int kRendererDefault = 0;   // [opengl-new] our own present (Windows default)
+#endif
+        int renderer = kRendererDefault;
+        int windowMode = 0;   // [display] 0 = windowed (resizable), 1 = borderless, 2 = fullscreen
+        int monitor = 0;      // [display] monitor index, 0 = primary
+        bool glow = true;
+        bool glowFix = true;   // [glowfix] Warriors's bloom/glow chain (Kaioken aura); applies on restart
+        bool bilinear = true;
+        bool halfTexel = true;
+        bool skipPost = true;
+        bool skipStaleVram = true;
+        int renderScale = 1; // built-in internal resolution multiplier derived from the window size: 720p=1x, 1080p=2x, 1440p+=3x
+        float deadzone = 0.15f;
+        bool rumble = true;          // [rumble] launcher Pads page: controller vibration on/off
+        int rumbleStrength = 100;    // [rumble] in %, 100 = the game's own strengths
+        bool fullscreen = false;  // [defaults-sync] do not force fullscreen on first launch (rig + user surprise); one toggle away in the overlay
+        bool widescreen = false;
+        bool outline = false;
+        bool texPack = false;   // [texreplace] use the PCSX2 replacement pack when one is indexed (default OFF)
+        bool introVideo = true; // [texui] 4K opening-video override when the pack ships it (applies on restart)
+        int buttonLayout = 1;   // [texui] 0 = PS2 (Original Buttons), 1 = Xbox (Xbox Layout); applies on restart
+        bool fps60 = false;   // [fps60] 60 fps mode: fight step 1 + the pacing table (applies between fights)
+    // [perf] Show the live fps / frame-time / GPU-busy block in this tab's STATUS section. Off by
+    // default because the GPU side costs a timing query per draw call.
+    bool showPerf = false;
+        int inkStrength = 199;   // [inkstrength] cel-outline darkener, % of Cs (199 = hardware 255/128)
+        int inkWidth = 100;      // [pgsink] paraLLEl-GS: outline stroke width, % of a PS2 texel (100 = native, 25 = thinnest)
+        unsigned inkColor = 0;   // [pgsink] paraLLEl-GS: outline colour 0xRRGGBB (0 = the game's black)
+        bool shadows = true;
+        bool dofBlur = false;
+        int dofZFar = 200000;
+        int windowW = 0, windowH = 0; // 0 = keep the default host window size
+        bool forceBilinear = true;    // PCSX2-style forced texture filtering (default ON)
+        bool overlayEnabled = true;   // [launcher] master switch: false = in-game overlay never opens
+        int hudLayout = 0;            // widescreen HUD: 0=centered 4:3, 1=edge-pinned, 2=custom
+        int hudOffL = 0, hudOffC = 0, hudOffR = 0;  // custom layout x-offsets (512-space px)
+        // Overlay launch / close binding. Each is a SET of inputs that must ALL be held
+        // together (1+ entries). Captured with a 3s hold during binding.
+        std::vector<int> overlayPadBtns = {13, 15};  // default: Select (Back) + Start
+        std::vector<int> overlayKeys   = {340, 258}; // default: Left Shift + Tab
+        // [loglevel] diagnostic verbosity applied at startup: 0=off, 1=profile+mclog+sched,
+        // 2=+ftspike+fightprobe+reveal, 3=+frameprof+camprobe. Drives which PS2X_* env vars
+        // main() exports; stderr is redirected to <deploy>/logs/warriors.log on any level > 0.
+        int logLevel = 1;
+
+        bool operator==(const Settings &o) const;
+    };
+
+    static bool isWidescreen() { return true; }   // [netmenu] forced ON for the whole game (no env)
+    static int getLogLevel() { return s_logLevel; }
+    static int getStartupLogLevel() { return s_startupLogLevel; }
+
+    static void preloadSettings();
+    void syncFromRuntime();   // seed m_settings from live runtime state
+    // Set the directory that holds settings.toml (portable dist: <root>/savedata).
+    static void setConfigDirectory(const std::string &dir);
+
+    struct DeviceInfo
+    {
+        std::string name;          // "Microsoft Xbox Controller (event257)"
+        int glfwSlot = -1;         // GLFW slot index, -1 if not GLFW
+        bool isEvdev = false;      // true if evdev native matches this device
+        ps2_stubs::PadDeviceKind kind = ps2_stubs::PadDeviceKind::None;
+    };
+
+    void initialize();
+    void draw(PS2Runtime &runtime);
+    // [perf] El medidor de esquina. Se dibuja dentro del MISMO frame de ImGui que el panel: el
+    // HUD y el panel nunca coexisten, asi que draw() tiene una rama propia para cuando el panel esta
+    // retraido (el estado normal) y, cuando esta desplegandose, lo pinta antes del fade para que no
+    // herede su opacidad.
+    void drawPerfHud();
+    void drawTagTeamFeed(const uint32_t *e, int n);
+    void drawTagTeamHud(const uint32_t *entries, int count);   // [tagteam]
+
+    // [mmpopup] The main-menu popup: an icon in the bottom-right corner that unfolds a panel.
+    // Wanted() is what the draw() early-out asks, so a retracted panel with the perf HUD off still
+    // opens a frame for it (UiBegin/UiEnd may only happen once per iteration). It is also where
+    // the panel's open state is reset: the draw function only runs while the gate is OPEN, so the
+    // closing edge has to be caught here or the panel would come back open after leaving the
+    // menu. Off unless PS2X_MAINMENU_POPUP_TEST=1.
+    static bool mainMenuPopupWanted();
+    void drawMainMenuPopup();
+
+    void shutdown();
+
+private:
+    static bool s_widescreen;
+    static std::string s_configDir;
+    static int s_logLevel;        // [loglevel] effective level for the live overlay UI
+    static int s_startupLogLevel; // [loglevel] captured before init so main() can apply env vars
+
+    bool m_visible = false;
+    bool m_initialized = false;
+    bool m_dirty = false;
+    Settings m_settings;
+    Settings m_settingsAtBoot;
+    std::string m_configPath;
+    int m_activeTab = 0;
+
+    // [envpersist] Which keys the environment owns this session, as a ps2x_settings::EnvLock mask
+    // (spelled ps2x_settings::kLock*, not imported: a using-declaration for a namespace enumerator
+    // is ill-formed at class scope, and GCC rejects what clang-cl accepts). loadSettings() sets the
+    // bits as it walks its own guards, so that walk stays the one definition of which keys are
+    // env-overridable, and saveSettings() hands the mask to ps2x_settings::applyOverlayValues() so
+    // a locked key keeps the file's value. Persisting an env override turns a one-session
+    // experiment into a permanent setting, and settings.toml is the only record of what the user
+    // chose.
+    uint32_t m_envLocked = 0;
+
+    // Open/close deploy animation. m_animT is an eased 0..1 value: 0 = fully
+    // closed/hidden, 1 = fully open. It chases m_visible every frame, so the
+    // panel keeps rendering (fading + sliding out) for a few frames AFTER
+    // m_visible flips to false, instead of popping away instantly.
+    float m_animT = 0.0f;
+
+    // Capsule HUD display font (Russo One), loaded once in initialize().
+    // Null (falls back to the default ImGui font) if the .ttf couldn't be found.
+    //
+    // REMOVED. Both were never assigned -- initialize() puts Russo One at Fonts[0] with
+    // io.Fonts->Clear() first, so the default font IS the HUD face and every caller gets it from
+    // ImGui::GetFont() without a member. A member that is always null is worse than no member: it
+    // reads like a loaded font, and handing it to ImDrawList::AddText() dereferences null and draws
+    // "???" where the text should be. That is exactly what happened to the [notify] cards.
+    //
+    // (Title bar and tab labels both render in the default font today, unchanged.)
+
+    // Settings dump logging — which areas are captured to the dump log.
+    bool m_dumpAudio = true;
+    bool m_dumpVideo = true;
+    bool m_dumpControllers = true;
+    bool m_dumpRuntime = true;
+    bool m_dumpGamepad = false;   // live test state, only meaningful while capture is read
+
+    // Device selection
+    std::vector<DeviceInfo> m_deviceList;
+    int m_selectedDevice = 0;
+
+    // Binding capture state
+    int m_captureAction = -1;
+    bool m_captureWaitRelease = false;
+    int m_editPlayer = 0;
+
+    // Edge detection state (always updated, even when not capturing)
+    std::array<uint8_t, 32> m_prevBtnDown{};
+    std::array<float, 6> m_prevAxis{};
+
+    // Overlay-toggle combo capture state (3s hold to bind one or more inputs).
+    int m_captureComboSlot = -1;          // 0 = gamepad, 1 = keyboard, -1 = none
+    float m_captureComboTimer = 0.0f;     // seconds remaining in the capture window
+    bool m_captureComboHadAny = false;    // whether something was captured yet
+    std::vector<int> m_capturedBtns;      // buttons held during capture
+    std::vector<int> m_capturedKeys;      // keys held during capture
+    std::array<uint8_t, 32> m_prevComboBtn{};
+
+    // Gamepad toggle combo edge state
+    bool m_prevToggleCombo = false;
+
+    // Whether the Bindings / Overlay-settings sub-window (popup) is open.
+    bool m_showBindingsPopup = false;
+
+    // [notify] One card in the top-left stack. Held here rather than drawn straight out of the
+    // bus's queue, because a card has a life measured in seconds and the queue is drained once per
+    // frame: drawing from the queue directly would make a card vanish the frame it arrived, and two
+    // events in the same frame would overwrite each other instead of stacking.
+    struct Card
+    {
+        NotifyKind kind = NotifyKind::Netplay;
+        std::string title;
+        std::string body;
+        float age = 0.0f;    // seconds on screen, drives slide and fade
+        float hold = 3.0f;   // how long it stays fully opaque
+        float y = 0.0f;      // eased toward its slot, so a new card pushes the stack smoothly
+        float h = 0.0f;      // [notifywrap] the card's height, fixed at creation from its wrapped text
+    };
+    std::vector<Card> m_cards;   // newest first
+
+    void toggleVisible();
+    void resetCaptureState();
+    void loadSettings();
+    void saveSettings() const;
+    void applySettings();
+    void applyDeadzone();
+    void buildDeviceList();
+    // [paddev] the Device combo edits ONE player: the combo index for the player's current assignment,
+    // and the assignment for a combo index (applied to that player only)
+    int deviceIndexForPlayer(int player) const;
+    void applyDeviceToPlayer(int player, int devIdx);
+    void readGamepadStateForDevice(const DeviceInfo &dev,
+                                   std::array<uint8_t, 32> &btnDown,
+                                   std::array<float, 6> &axis);
+    void drawAudioTab();
+    void drawVideoTab();
+    void drawControllersTab();
+    void drawLoggingTab();
+    void drawAboutTab();
+    void drawNetplayTab();   // [netplay]
+    void drawAchTab();       // [ach] the achievement list
+    void drawNotifyStack();  // [notify] the top-left popup stack, over whatever else is up
+    void drawGamepadTestArea(const std::array<uint8_t, 32> &btnDown,
+                             const std::array<float, 6> &axis);
+    void drawBindingsTable();
+    void drawOverlayToggle();
+    void drawBindingsPopup();
+    void dumpSettingsToFile();
+};

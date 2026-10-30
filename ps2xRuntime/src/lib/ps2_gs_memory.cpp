@@ -1,0 +1,571 @@
+#include <vector>
+#include <array>
+#include <atomic>
+#include <cstdlib>
+#include <iostream>
+
+#include "runtime/ps2_gs_memory.h"
+
+namespace GSMem
+{
+    using enum PixelStorageMode;
+
+    using C32Traits  = PixelStorageTraits<C32>;
+    using Z32Traits  = PixelStorageTraits<Z32>;
+    using C16Traits  = PixelStorageTraits<C16>;
+    using C16STraits = PixelStorageTraits<C16S>;
+    using Z16Traits  = PixelStorageTraits<Z16>;
+    using Z16STraits = PixelStorageTraits<Z16S>;
+    using P8Traits   = PixelStorageTraits<P8>;
+    using P4Traits   = PixelStorageTraits<P4>;
+
+    using C32PageLookupTable    = C32Traits::PageLookupTableT;
+    using C32BlockLookupTableT  = C32Traits::BlockLookupTableT;
+    using Z32PageLookupTableT = Z32Traits::PageLookupTableT;
+    using Z32BlockLookupTableT = Z32Traits::BlockLookupTableT;
+
+    // column table is shared
+    using C32ColumnLookupTableT = C32Traits::ColumnLookupTableT;
+
+    using C16PageLookupTable   = C16Traits::PageLookupTableT;
+    using C16BlockLookupTable  = C16Traits::BlockLookupTableT;
+    using Z16PageLookupTable   = Z16Traits::PageLookupTableT;
+    using Z16BlockLookupTable  = Z16Traits::BlockLookupTableT;
+
+    using C16SPageLookupTable  = C16STraits::PageLookupTableT;
+    using C16SBlockLookupTable = C16STraits::BlockLookupTableT;
+    using Z16SPageLookupTable  = Z16STraits::PageLookupTableT;
+    using Z16SBlockLookupTable = Z16STraits::BlockLookupTableT;
+
+    // column table is shared
+    using C16ColumnLookupTable = C16Traits::ColumnLookupTableT;
+
+    using P8PageLookupTable   = P8Traits::PageLookupTableT;
+    using P8BlockLookupTable  = P8Traits::BlockLookupTableT;
+    using P8ColumnLookupTable = P8Traits::ColumnLookupTableT;
+
+    using P4PageLookupTable   = P4Traits::PageLookupTableT;
+    using P4BlockLookupTable  = P4Traits::BlockLookupTableT;
+    using P4ColumnLookupTable = P4Traits::ColumnLookupTableT;
+
+    static constexpr C32BlockLookupTableT BlockTableC32
+    {{
+        {  0,  1,  4,  5, 16, 17, 20, 21 },
+        {  2,  3,  6,  7, 18, 19, 22, 23 },
+        {  8,  9, 12, 13, 24, 25, 28, 29 },
+        { 10, 11, 14, 15, 26, 27, 30, 31 }
+    }};
+
+    static constexpr Z32BlockLookupTableT BlockTableZ32
+    {{
+        { 24, 25, 28, 29,  8,  9, 12, 13 },
+        { 26, 27, 30, 31, 10, 11, 14, 15 },
+        { 16, 17, 20, 21,  0,  1,  4,  5 },
+        { 18, 19, 22, 23,  2,  3,  6,  7 }
+    }};
+
+    static constexpr C16BlockLookupTable BlockTableC16
+    {{
+        {  0,  2,  8, 10 },
+        {  1,  3,  9, 11 },
+        {  4,  6, 12, 14 },
+        {  5,  7, 13, 15 },
+        { 16, 18, 24, 26 },
+        { 17, 19, 25, 27 },
+        { 20, 22, 28, 30 },
+        { 21, 23, 29, 31 }
+    }};
+
+    static constexpr C16SBlockLookupTable BlockTableC16S
+    {{
+        {  0,  2, 16, 18 },
+        {  1,  3, 17, 19 },
+        {  8, 10, 24, 26 },
+        {  9, 11, 25, 27 },
+        {  4,  6, 20, 22 },
+        {  5,  7, 21, 23 },
+        { 12, 14, 28, 30 },
+        { 13, 15, 29, 31 }
+    }};
+
+    static constexpr Z16BlockLookupTable BlockTableZ16
+    {{
+        { 24, 26, 16, 18 },
+        { 25, 27, 17, 19 },
+        { 28, 30, 20, 22 },
+        { 29, 31, 21, 23 },
+        {  8, 10,  0,  2 },
+        {  9, 11,  1,  3 },
+        { 12, 14,  4,  6 },
+        { 13, 15,  5,  7 }
+    }};
+
+    static constexpr Z16SBlockLookupTable BlockTableZ16S
+    {{
+        { 24, 26,  8, 10 },
+        { 25, 27,  9, 11 },
+        { 16, 18,  0,  2 },
+        { 17, 19,  1,  3 },
+        { 28, 30, 12, 14 },
+        { 29, 31, 13, 15 },
+        { 20, 22,  4,  6 },
+        { 21, 23,  5,  7 }
+    }};
+
+    static constexpr P8BlockLookupTable BlockTableP8
+    {{
+        {  0,  1,  4,  5, 16, 17, 20, 21},
+        {  2,  3,  6,  7, 18, 19, 22, 23},
+        {  8,  9, 12, 13, 24, 25, 28, 29},
+        { 10, 11, 14, 15, 26, 27, 30, 31}
+    }};
+
+    static constexpr P4BlockLookupTable BlockTableP4
+    {{
+        {  0,  2,  8, 10 },
+        {  1,  3,  9, 11 },
+        {  4,  6, 12, 14 },
+        {  5,  7, 13, 15 },
+        { 16, 18, 24, 26 },
+        { 17, 19, 25, 27 },
+        { 20, 22, 28, 30 },
+        { 21, 23, 29, 31 }
+    }};
+
+    // column layout is shared between c32 and z32
+    static constexpr C32ColumnLookupTableT ColumnTable32
+    {{
+        {  0,  1,  4,  5,  8,  9, 12, 13 },
+        {  2,  3,  6,  7, 10, 11, 14, 15 },
+        { 16, 17, 20, 21, 24, 25, 28, 29 },
+        { 18, 19, 22, 23, 26, 27, 30, 31 },
+        { 32, 33, 36, 37, 40, 41, 44, 45 },
+        { 34, 35, 38, 39, 42, 43, 46, 47 },
+        { 48, 49, 52, 53, 56, 57, 60, 61 },
+        { 50, 51, 54, 55, 58, 59, 62, 63 },
+    }};
+
+    static constexpr C16ColumnLookupTable ColumnTable16
+    {{
+        {   0,   2,   8,  10,  16,  18,  24,  26,   1,   3,   9,  11,  17,  19,  25,  27 },
+        {   4,   6,  12,  14,  20,  22,  28,  30,   5,   7,  13,  15,  21,  23,  29,  31 },
+        {  32,  34,  40,  42,  48,  50,  56,  58,  33,  35,  41,  43,  49,  51,  57,  59 },
+        {  36,  38,  44,  46,  52,  54,  60,  62,  37,  39,  45,  47,  53,  55,  61,  63 },
+        {  64,  66,  72,  74,  80,  82,  88,  90,  65,  67,  73,  75,  81,  83,  89,  91 },
+        {  68,  70,  76,  78,  84,  86,  92,  94,  69,  71,  77,  79,  85,  87,  93,  95 },
+        {  96,  98, 104, 106, 112, 114, 120, 122,  97,  99, 105, 107, 113, 115, 121, 123 },
+        { 100, 102, 108, 110, 116, 118, 124, 126, 101, 103, 109, 111, 117, 119, 125, 127 }
+    }};
+
+    static constexpr P8ColumnLookupTable ColumnTable8
+    {{
+        {   0,   4,  16,  20,  32,  36,  48,  52,   2,   6,  18,  22,  34,  38,  50,  54 },
+        {   8,  12,  24,  28,  40,  44,  56,  60,  10,  14,  26,  30,  42,  46,  58,  62 },
+        {  33,  37,  49,  53,   1,   5,  17,  21,  35,  39,  51,  55,   3,   7,  19,  23 },
+        {  41,  45,  57,  61,   9,  13,  25,  29,  43,  47,  59,  63,  11,  15,  27,  31 },
+        {  96, 100, 112, 116,  64,  68,  80,  84,  98, 102, 114, 118,  66,  70,  82,  86 },
+        { 104, 108, 120, 124,  72,  76,  88,  92, 106, 110, 122, 126,  74,  78,  90,  94 },
+        {  65,  69,  81,  85,  97, 101, 113, 117,  67,  71,  83,  87,  99, 103, 115, 119 },
+        {  73,  77,  89,  93, 105, 109, 121, 125,  75,  79,  91,  95, 107, 111, 123, 127 },
+        { 128, 132, 144, 148, 160, 164, 176, 180, 130, 134, 146, 150, 162, 166, 178, 182 },
+        { 136, 140, 152, 156, 168, 172, 184, 188, 138, 142, 154, 158, 170, 174, 186, 190 },
+        { 161, 165, 177, 181, 129, 133, 145, 149, 163, 167, 179, 183, 131, 135, 147, 151 },
+        { 169, 173, 185, 189, 137, 141, 153, 157, 171, 175, 187, 191, 139, 143, 155, 159 },
+        { 224, 228, 240, 244, 192, 196, 208, 212, 226, 230, 242, 246, 194, 198, 210, 214 },
+        { 232, 236, 248, 252, 200, 204, 216, 220, 234, 238, 250, 254, 202, 206, 218, 222 },
+        { 193, 197, 209, 213, 225, 229, 241, 245, 195, 199, 211, 215, 227, 231, 243, 247 },
+        { 201, 205, 217, 221, 233, 237, 249, 253, 203, 207, 219, 223, 235, 239, 251, 255 }
+    }};
+
+    static constexpr P4ColumnLookupTable ColumnTable4
+    {{
+        {   0,   8,  32,  40,  64,  72,  96, 104,   2,  10,  34,  42,  66,  74,  98, 106,   4,  12,  36,  44,  68,  76, 100, 108,   6,  14,  38,  46,  70,  78, 102, 110 },
+        {  16,  24,  48,  56,  80,  88, 112, 120,  18,  26,  50,  58,  82,  90, 114, 122,  20,  28,  52,  60,  84,  92, 116, 124,  22,  30,  54,  62,  86,  94, 118, 126 },
+        {  65,  73,  97, 105,   1,   9,  33,  41,  67,  75,  99, 107,   3,  11,  35,  43,  69,  77, 101, 109,   5,  13,  37,  45,  71,  79, 103, 111,   7,  15,  39,  47 },
+        {  81,  89, 113, 121,  17,  25,  49,  57,  83,  91, 115, 123,  19,  27,  51,  59,  85,  93, 117, 125,  21,  29,  53,  61,  87,  95, 119, 127,  23,  31,  55,  63 },
+        { 192, 200, 224, 232, 128, 136, 160, 168, 194, 202, 226, 234, 130, 138, 162, 170, 196, 204, 228, 236, 132, 140, 164, 172, 198, 206, 230, 238, 134, 142, 166, 174 },
+        { 208, 216, 240, 248, 144, 152, 176, 184, 210, 218, 242, 250, 146, 154, 178, 186, 212, 220, 244, 252, 148, 156, 180, 188, 214, 222, 246, 254, 150, 158, 182, 190 },
+        { 129, 137, 161, 169, 193, 201, 225, 233, 131, 139, 163, 171, 195, 203, 227, 235, 133, 141, 165, 173, 197, 205, 229, 237, 135, 143, 167, 175, 199, 207, 231, 239 },
+        { 145, 153, 177, 185, 209, 217, 241, 249, 147, 155, 179, 187, 211, 219, 243, 251, 149, 157, 181, 189, 213, 221, 245, 253, 151, 159, 183, 191, 215, 223, 247, 255 },
+        { 256, 264, 288, 296, 320, 328, 352, 360, 258, 266, 290, 298, 322, 330, 354, 362, 260, 268, 292, 300, 324, 332, 356, 364, 262, 270, 294, 302, 326, 334, 358, 366 },
+        { 272, 280, 304, 312, 336, 344, 368, 376, 274, 282, 306, 314, 338, 346, 370, 378, 276, 284, 308, 316, 340, 348, 372, 380, 278, 286, 310, 318, 342, 350, 374, 382 },
+        { 321, 329, 353, 361, 257, 265, 289, 297, 323, 331, 355, 363, 259, 267, 291, 299, 325, 333, 357, 365, 261, 269, 293, 301, 327, 335, 359, 367, 263, 271, 295, 303 },
+        { 337, 345, 369, 377, 273, 281, 305, 313, 339, 347, 371, 379, 275, 283, 307, 315, 341, 349, 373, 381, 277, 285, 309, 317, 343, 351, 375, 383, 279, 287, 311, 319 },
+        { 448, 456, 480, 488, 384, 392, 416, 424, 450, 458, 482, 490, 386, 394, 418, 426, 452, 460, 484, 492, 388, 396, 420, 428, 454, 462, 486, 494, 390, 398, 422, 430 },
+        { 464, 472, 496, 504, 400, 408, 432, 440, 466, 474, 498, 506, 402, 410, 434, 442, 468, 476, 500, 508, 404, 412, 436, 444, 470, 478, 502, 510, 406, 414, 438, 446 },
+        { 385, 393, 417, 425, 449, 457, 481, 489, 387, 395, 419, 427, 451, 459, 483, 491, 389, 397, 421, 429, 453, 461, 485, 493, 391, 399, 423, 431, 455, 463, 487, 495 },
+        { 401, 409, 433, 441, 465, 473, 497, 505, 403, 411, 435, 443, 467, 475, 499, 507, 405, 413, 437, 445, 469, 477, 501, 509, 407, 415, 439, 447, 471, 479, 503, 511 },
+    }};
+
+    // this is going to be massive (an entire page of addess lookups)
+    static C32PageLookupTable  PageTableC32{ };
+    static Z32PageLookupTableT PageTableZ32{ };
+    static C16PageLookupTable  PageTableC16{ };
+    static C16SPageLookupTable PageTableC16S{ };
+    static Z16PageLookupTable  PageTableZ16{ };
+    static Z16SPageLookupTable PageTableZ16S{ };
+    static P8PageLookupTable   PageTableP8{ };
+    static P4PageLookupTable   PageTableP4{ };
+
+    // [ct16pair] PS2X_CT16MAPBUILD=1 (diag, runs once at table init): derive and VERIFY the CT16-view -> CT32 pairing
+    // that the GPU alias passes need. For each CT16 pixel (x16,y16) of a fbw-8 view, find which CT32 pixel (x32,y32)
+    // of the same pages holds its two bytes and which half (0 = bits 0..15 = B,G bytes-ish; 1 = bits 16..31).
+    // Verified by writing a sentinel through WriteVram(psm=CT16) into a zeroed buffer and reading the CT32 word back.
+    static void ct16MapBuild()
+    {
+        const u32 bw = 8u;   // 512-px view, the shape Warriors uses for fbp0/112/336
+        int shape_x_ok = 0, shape_y_ok = 0, n = 0, verified = 0, mismatch = 0;
+        int sampleN = 0;
+        std::vector<u8> scratch(MEMORY_SIZE, 0u);
+        for (u32 y16 = 0; y16 < 96u; ++y16)
+            for (u32 x16 = 0; x16 < 128u; ++x16)
+            {
+                const u32 a16 = PixelStorageTraits<C16>::Address(PageTableC16, 0u, bw, x16, y16) * 2u;   // byte addr
+                // find the CT32 pixel owning these bytes: its word-aligned base
+                const u32 wordByte = a16 & ~3u; const u32 half = (a16 & 2u) >> 1;
+                // search the CT32 pixel with that word address in a local window (same pages)
+                bool found = false; u32 fx = 0, fy = 0;
+                for (u32 y32 = (y16 / 2 > 4u ? y16 / 2 - 4u : 0u); y32 < y16 / 2 + 5u && !found; ++y32)
+                    for (u32 x32 = (x16 > 8u ? x16 - 8u : 0u); x32 < x16 + 9u; ++x32)
+                        if (PixelStorageTraits<C32>::Address(PageTableC32, 0u, bw, x32, y32) * 4u == wordByte) { found = true; fx = x32; fy = y32; break; }
+                if (!found) continue;
+                ++n; shape_x_ok += (fx == x16); shape_y_ok += (fy == y16 / 2 && (y16 & 1u) == half) || (fy == y16 / 2);
+                if (sampleN < 12 && (x16 < 3u || y16 < 3u || (x16 == 64u && y16 < 6u)))
+                { ++sampleN; std::fprintf(stderr, "[ct16pair] (%3u,%3u) -> CT32 (%3u,%3u) half=%u\n", x16, y16, fx, fy, half); }
+                // verify with a real write
+                if ((x16 % 17u) == 0u && (y16 % 13u) == 0u)
+                {
+                    std::fill(scratch.begin(), scratch.begin() + 65536, 0u);
+                    PixelStorageTraits<C16>::Write(PageTableC16, scratch.data(), 0u, bw, x16, y16, 0xABCDu);
+                    u32 w32 = 0; std::memcpy(&w32, &scratch[wordByte], 4u);
+                    const u32 got = half ? (w32 >> 16) : (w32 & 0xFFFFu);
+                    if (got == 0xABCDu) ++verified; else ++mismatch;
+                }
+            }
+        std::fprintf(stderr, "[ct16pair] mapped %d px: x32==x16 %d, y-shape(y/2,half=y&1) %d | write-verified %d, mismatched %d\n",
+                     n, shape_x_ok, shape_y_ok, verified, mismatch);
+    }
+    void InitLookupTables()
+    {
+        // 32 bit
+        PixelStorageTraits<C32>::InitPageLookupTable(PageTableC32, BlockTableC32, ColumnTable32);
+        PixelStorageTraits<Z32>::InitPageLookupTable(PageTableZ32, BlockTableZ32, ColumnTable32);
+
+        // 16 bit
+        PixelStorageTraits<C16>::InitPageLookupTable(PageTableC16, BlockTableC16, ColumnTable16);
+        PixelStorageTraits<C16S>::InitPageLookupTable(PageTableC16S, BlockTableC16S, ColumnTable16);
+        PixelStorageTraits<Z16>::InitPageLookupTable(PageTableZ16, BlockTableZ16, ColumnTable16);
+        PixelStorageTraits<Z16S>::InitPageLookupTable(PageTableZ16S, BlockTableZ16S, ColumnTable16);
+        { const char *v = std::getenv("PS2X_CT16MAPBUILD"); if (v && v[0] && v[0] != '0') ct16MapBuild(); }   // [ct16pair]
+
+        // 8 bit
+        PixelStorageTraits<P8>::InitPageLookupTable(PageTableP8, BlockTableP8, ColumnTable8);
+
+        // 4 bit
+        PixelStorageTraits<P4>::InitPageLookupTable(PageTableP4, BlockTableP4, ColumnTable4);
+    }
+
+    void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<C32>::Write(PageTableC32, data, bp, bw, x, y, value);
+    }
+
+    u32 WriteRowCT32(u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, const u32* src, const u8* mask)
+    {
+        // Same address as PixelStorageTraits<C32>::Address/Write: page * PixelsPerPage + table[block][y%32][x%64],
+        // 4 bytes per pixel, wrapped to MEMORY_SIZE.
+        constexpr u32 kBlocks = C32Traits::BlocksPerPage();          // 32
+        constexpr auto kExt   = C32Traits::PageExtent();             // 64 x 32
+        constexpr u32 kPixels = C32Traits::PixelsPerPage();          // 2048
+        const u32 block = bp % kBlocks;
+        const auto &row = PageTableC32[block][y % kExt.y];
+        u32 n = 0;
+        u32 x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);   // end of this 64-px page column
+            const u32 page = static_cast<u32>(C32Traits::PageId(bp, bw, x, y));
+            const usz pageBase = static_cast<usz>(page) * kPixels;
+            for (; x < colEnd; ++x)
+            {
+                if (mask && !mask[x - x0]) continue;   // [rowrel] src/mask are RELATIVE to x0 (like WriteRowP8/ReadRow*)
+                const usz byte_addr = ((pageBase + row[x % kExt.x]) * 4u) & (MEMORY_SIZE - 4u);
+                std::memcpy(&data[byte_addr], &src[x - x0], 4u);
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    template <typename TraitsT, typename TableT>
+    static u32 writeRow16(const TableT &table, u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, const u16* src, const u8* mask)
+    {   // mirrors PixelStorageTraits<C16*>::Write: byte = (pixel_addr * 2) & (MEMORY_SIZE - 2)
+        constexpr u32 kBlocks = TraitsT::BlocksPerPage();
+        constexpr auto kExt   = TraitsT::PageExtent();             // 64 x 64
+        constexpr u32 kPixels = TraitsT::PixelsPerPage();          // 4096
+        const u32 block = bp % kBlocks;
+        const auto &row = table[block][y % kExt.y];
+        u32 n = 0, x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(TraitsT::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x)
+            {
+                if (mask && !mask[x - x0]) continue;   // [rowrel]
+                const usz byte_addr = ((pageBase + row[x % kExt.x]) * 2u) & (MEMORY_SIZE - 2u);
+                std::memcpy(&data[byte_addr], &src[x - x0], 2u);
+                ++n;
+            }
+        }
+        return n;
+    }
+    u32 WriteRowP8(u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, const u8* src)
+    {   // mirrors PixelStorageTraits<P8>::Write: byte = pixel_addr (8 bpp), page 128x64 texels
+        constexpr u32 kBlocks = P8Traits::BlocksPerPage(); constexpr auto kExt = P8Traits::PageExtent(); constexpr u32 kPixels = P8Traits::PixelsPerPage();
+        const auto &row = PageTableP8[bp % kBlocks][y % kExt.y];
+        u32 n = 0, x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(P8Traits::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x) { data[(pageBase + row[x % kExt.x]) & (MEMORY_SIZE - 1u)] = src[x - x0]; ++n; }
+        }
+        return n;
+    }
+    // [rowdecode] bulk row readers -- mirror the writers: page once per 64-px column, one table lookup per texel.
+    void ReadRowP8(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u8* dst)   // [fastdec] mirrors WriteRowP8
+    {
+        constexpr u32 kBlocks = P8Traits::BlocksPerPage(); constexpr auto kExt = P8Traits::PageExtent(); constexpr u32 kPixels = P8Traits::PixelsPerPage();
+        const auto &row = PageTableP8[bp % kBlocks][y % kExt.y];
+        u32 x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(P8Traits::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x) dst[x - x0] = data[(pageBase + row[x % kExt.x]) & (MEMORY_SIZE - 1u)];
+        }
+    }
+    void ReadRowP4(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u8* dst)   // [fastdec] 4 bpp: table entry = nibble address
+    {
+        constexpr u32 kBlocks = P4Traits::BlocksPerPage(); constexpr auto kExt = P4Traits::PageExtent(); constexpr u32 kPixels = P4Traits::PixelsPerPage();
+        const auto &row = PageTableP4[bp % kBlocks][y % kExt.y];
+        u32 x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(P4Traits::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x) { const usz na = pageBase + row[x % kExt.x]; const u8 b = data[(na >> 1) & (MEMORY_SIZE - 1u)]; dst[x - x0] = (na & 1u) ? (b >> 4) : (b & 0x0Fu); }
+        }
+    }
+    void ReadRowCT32(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u32* dst)
+    {
+        constexpr u32 kBlocks = C32Traits::BlocksPerPage(); constexpr auto kExt = C32Traits::PageExtent(); constexpr u32 kPixels = C32Traits::PixelsPerPage();
+        const auto &row = PageTableC32[bp % kBlocks][y % kExt.y];
+        u32 x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(C32Traits::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x) { const usz a = ((pageBase + row[x % kExt.x]) * 4u) & (MEMORY_SIZE - 4u); std::memcpy(dst + (x - x0), &data[a], 4u); }
+        }
+    }
+    void ReadRowP8H(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u8* dst)
+    {   // P8H = the high byte of the CT32 word at the same pixel address (BitOffset 24)
+        constexpr u32 kBlocks = C32Traits::BlocksPerPage(); constexpr auto kExt = C32Traits::PageExtent(); constexpr u32 kPixels = C32Traits::PixelsPerPage();
+        const auto &row = PageTableC32[bp % kBlocks][y % kExt.y];
+        u32 x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(C32Traits::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x) { const usz a = ((pageBase + row[x % kExt.x]) * 4u + 3u) & (MEMORY_SIZE - 1u); dst[x - x0] = data[a]; }
+        }
+    }
+    template <typename TraitsT, typename TableT>
+    static void readRow16(const TableT &table, const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u16* dst)
+    {
+        constexpr u32 kBlocks = TraitsT::BlocksPerPage(); constexpr auto kExt = TraitsT::PageExtent(); constexpr u32 kPixels = TraitsT::PixelsPerPage();
+        const auto &row = table[bp % kBlocks][y % kExt.y];
+        u32 x = x0;
+        while (x < x1)
+        {
+            const u32 colEnd = std::min(x1, (x / kExt.x + 1u) * kExt.x);
+            const usz pageBase = static_cast<usz>(TraitsT::PageId(bp, bw, x, y)) * kPixels;
+            for (; x < colEnd; ++x) { const usz a = ((pageBase + row[x % kExt.x]) * 2u) & (MEMORY_SIZE - 2u); std::memcpy(dst + (x - x0), &data[a], 2u); }
+        }
+    }
+    void ReadRowCT16(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u16* dst)  { readRow16<C16Traits>(PageTableC16, data, bp, bw, x0, x1, y, dst); }
+    void ReadRowZ16(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u16* dst)   { readRow16<Z16Traits>(PageTableZ16, data, bp, bw, x0, x1, y, dst); }   // [fastdec] the depth->alpha 1024x1024 read
+    void ReadRowZ16S(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u16* dst)  { readRow16<Z16STraits>(PageTableZ16S, data, bp, bw, x0, x1, y, dst); }
+    void ReadRowCT16S(const u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, u16* dst) { readRow16<C16STraits>(PageTableC16S, data, bp, bw, x0, x1, y, dst); }
+
+    u32 WriteRowCT16(u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, const u16* src, const u8* mask)
+    { return writeRow16<C16Traits>(PageTableC16, data, bp, bw, x0, x1, y, src, mask); }
+    u32 WriteRowCT16S(u8* data, u32 bp, u32 bw, u32 x0, u32 x1, u32 y, const u16* src, const u8* mask)
+    { return writeRow16<C16STraits>(PageTableC16S, data, bp, bw, x0, x1, y, src, mask); }
+
+    void WriteCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<C24>::Write(PageTableC32, data, bp, bw, x, y, value);
+    }
+
+    void WriteZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<Z32>::Write(PageTableZ32, data, bp, bw, x, y, value);
+    }
+
+    void WriteZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<Z24>::Write(PageTableZ32, data, bp, bw, x, y, value);
+    }
+
+    void WriteCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<C16>::Write(PageTableC16, data, bp, bw, x, y, value);
+    }
+
+    void WriteCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<C16S>::Write(PageTableC16S, data, bp, bw, x, y, value);
+    }
+
+    void WriteZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<Z16>::Write(PageTableZ16, data, bp, bw, x, y, value);
+    }
+
+    void WriteZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<Z16S>::Write(PageTableZ16S, data, bp, bw, x, y, value);
+    }
+
+    void WriteP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<P8>::Write(PageTableP8, data, bp, bw, x, y, value);
+    }
+
+    void WriteP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<P8H>::Write(PageTableC32, data, bp, bw, x, y, value);
+    }
+
+    void WriteP4(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<P4>::Write(PageTableP4, data, bp, bw, x, y, value);
+    }
+
+    void WriteP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<P4HL>::Write(PageTableC32, data, bp, bw, x, y, value);
+    }
+
+    void WriteP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        PixelStorageTraits<P4HH>::Write(PageTableC32, data, bp, bw, x, y, value);
+    }
+
+    void WriteNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+    }
+
+    u32 ReadCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<C32>::Read(PageTableC32, data, bp, bw, x, y);
+    }
+
+    u32 AddrCT32(u32 bp, u32 bw, u32 x, u32 y)
+    {
+        // Identical to the byte_addr computed inside ReadCT32/WriteCT32 (and CT24,
+        // which shares the C32 page table + 32-bit unpacked width). Kept in lockstep
+        // with PixelStorageTraits<C32>::Read/Write so a direct RMW cannot desync.
+        const u32 pixel_addr = PixelStorageTraits<C32>::Address(PageTableC32, bp, bw, x, y);
+        const u32 bits = pixel_addr * UnpackedBitWidth(C32); // BitOffset(C32)==0
+        return (bits / 8u) & (MEMORY_SIZE - static_cast<u32>(sizeof(u32)));
+    }
+
+    u32 ReadZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<Z32>::Read(PageTableZ32, data, bp, bw, x, y);
+    }
+
+    u32 ReadCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<C24>::Read(PageTableC32, data, bp, bw, x, y);
+    }
+
+    u32 ReadZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<Z24>::Read(PageTableZ32, data, bp, bw, x, y);
+    }
+
+    u32 ReadCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<C16>::Read(PageTableC16, data, bp, bw, x, y);
+    }
+
+    u32 ReadCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<C16S>::Read(PageTableC16S, data, bp, bw, x, y);
+    }
+
+    u32 ReadZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<Z16>::Read(PageTableZ16, data, bp, bw, x, y);
+    }
+
+    u32 ReadZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<Z16S>::Read(PageTableZ16S, data, bp, bw, x, y);
+    }
+
+    u32 ReadP8(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<P8>::Read(PageTableP8, data, bp, bw, x, y);
+    }
+
+    u32 ReadP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<P8H>::Read(PageTableC32, data, bp, bw, x, y);
+    }
+
+    u32 ReadP4(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        u32 r = PixelStorageTraits<P4>::Read(PageTableP4, data, bp, bw, x, y);
+        static const bool s_p = [](){ const char* v = std::getenv("PS2X_P4_PROBE"); return v && v[0] && v[0] != '0'; }();
+        if (s_p)
+        {
+            static std::atomic<uint32_t> s_n{0};
+            uint32_t n = s_n.fetch_add(1);
+            if (n < 32u)
+            {
+                const u32 pa = PixelStorageTraits<P4>::Address(PageTableP4, bp, bw, x, y);
+                const u32 ba = (pa * 4u) / 8u;
+                const u32 pa8 = PixelStorageTraits<P8>::Address(PageTableP8, bp, 1, x, y);
+                std::cerr << "[p4-addr] bp=0x" << std::hex << bp << " x=" << std::dec << x << " y=" << y
+                          << " | P4 pixaddr=" << pa << " byteaddr=0x" << std::hex << ba
+                          << " byte=0x" << (int)data[ba & 0x3FFFFF] << " -> idx=0x" << r
+                          << " | P8addr=" << std::dec << pa8 << " (byte=0x" << std::hex << (int)data[pa8 & 0x3FFFFF] << ")" << std::dec
+                          << std::endl;
+            }
+        }
+        return r;
+    }
+
+    u32 ReadP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<P4HL>::Read(PageTableC32, data, bp, bw, x, y);
+    }
+
+    u32 ReadP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return PixelStorageTraits<P4HH>::Read(PageTableC32, data, bp, bw, x, y);
+    }
+
+    u32 ReadNull(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return 0;
+    }
+}
+
+

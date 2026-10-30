@@ -1,0 +1,3 @@
+[submodule "ps2xRecomp"]
+	path = ps2xRecomp
+	url = https://github.com/ran-j/PS2Recomp
