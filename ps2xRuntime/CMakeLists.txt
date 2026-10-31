@@ -956,7 +956,11 @@ target_sources(ps2_runtime PRIVATE
     src/gfx/gs_rt.cpp
     src/gfx/gs_gl.cpp
     src/gfx/image_io.cpp
-    src/gfx/video_overlay.cpp)
+    src/gfx/video_overlay.cpp
+    # [TWR-14] RenderWare 3.x OpenGL renderer (SLUS_212.15)
+    src/gfx/rw_renderer.cpp
+    src/gfx/rw_mesh_cache.cpp
+    src/gfx/rw_texture_cache.cpp)
 if(PS2X_USE_GSRL)
     target_compile_definitions(ps2_runtime PRIVATE PS2X_USE_GSRL=1)
     message(STATUS "[gsrl] experiment ON: the replay submits through the renamed vendored rlgl copy")
