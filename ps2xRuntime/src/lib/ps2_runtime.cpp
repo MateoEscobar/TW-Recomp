@@ -580,6 +580,19 @@ static constexpr int HOST_WINDOW_HEIGHT = 544;
 static constexpr int HOST_WINDOW_WIDTH = 1280;
 static constexpr int HOST_WINDOW_HEIGHT = 720;
 #endif
+// [TWR-15] Compute window dimensions from render_scale and widescreen flag.
+// Formula: w = 640*scale, h = widescreen ? 360*scale : 480*scale.
+// Used by the window bootstrap to auto-derive dimensions when video.window_w/window_h
+// are not explicitly set by the user. render_scale is clamped to [1,4].
+namespace ps2x {
+static inline std::pair<int,int> wsResolution(int scale, bool widescreen)
+{
+    if (scale < 1) scale = 1;
+    if (scale > 4) scale = 4;
+    return { 640 * scale, widescreen ? 360 * scale : 480 * scale };
+}
+}
+
 struct ElfHeader
 {
     uint32_t magic;
@@ -1557,6 +1570,22 @@ bool PS2Runtime::initialize(const char *title)
             if (const char *m = std::getenv("PS2X_MONITOR")) if (m[0]) winMonitor = std::atoi(m);
             if (const char *w = std::getenv("PS2X_WINDOW_W")) { const int v = std::atoi(w); if (v > 0) hostWinW = v; }
             if (const char *h = std::getenv("PS2X_WINDOW_H")) { const int v = std::atoi(h); if (v > 0) hostWinH = v; }
+            // [TWR-15] Auto-derive window size from render_scale + widescreen when user did not
+            // set video.window_w / video.window_h explicitly (neither in TOML nor env vars).
+            // Explicit values always take precedence (behavior preserved).
+            {
+                const bool userW = doc.has("video.window_w") || std::getenv("PS2X_WINDOW_W");
+                const bool userH = doc.has("video.window_h") || std::getenv("PS2X_WINDOW_H");
+                if (!userW || !userH) {
+                    const int rs = GsGpuRenderer::renderScale();
+                    if (rs >= 1 && rs <= 4) {
+                        const bool ws = doc.getB("video.widescreen", false);
+                        auto [cw, ch] = ps2x::wsResolution(rs, ws);
+                        if (!userW) hostWinW = cw;
+                        if (!userH) hostWinH = ch;
+                    }
+                }
+            }
             if (hostWinW < 320) hostWinW = HOST_WINDOW_WIDTH;
             if (hostWinH < 240) hostWinH = HOST_WINDOW_HEIGHT;
             if (winMode < 0) winMode = 0;
