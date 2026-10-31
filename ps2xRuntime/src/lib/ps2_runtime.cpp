@@ -580,10 +580,7 @@ static constexpr int HOST_WINDOW_HEIGHT = 544;
 static constexpr int HOST_WINDOW_WIDTH = 1280;
 static constexpr int HOST_WINDOW_HEIGHT = 720;
 #endif
-// [TWR-15] Compute window dimensions from render_scale and widescreen flag.
-// Formula: w = 640*scale, h = widescreen ? 360*scale : 480*scale.
-// Used by the window bootstrap to auto-derive dimensions when video.window_w/window_h
-// are not explicitly set by the user. render_scale is clamped to [1,4].
+// [TWR-15] w=640*s, h=widescreen?360*s:480*s; clamped [1,4]; used by bootstrap when window_w/h absent.
 namespace ps2x {
 static inline std::pair<int,int> wsResolution(int scale, bool widescreen)
 {
