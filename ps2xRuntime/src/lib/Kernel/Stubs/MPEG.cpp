@@ -61,6 +61,13 @@ namespace ps2_stubs
             });
         }
 
+        // [fmvaudio] PSS FMV audio stream ID (TWR-16). 0xF0 is kSeStreamId in game_overrides.cpp.
+        constexpr uint32_t kFmvStreamId = 0xF1u;
+
+        // [fmvaudio] Set by sceMpegDemuxPss(Ring) before processPssBuffer runs; read by MpegPssAudioDecoder.
+        // Written and read only while g_mpeg_stub_mutex is held, so no extra synchronisation needed.
+        PS2Runtime *g_mpegRuntime = nullptr;
+
         class MpegFfmpegDecoder
         {
         public:
@@ -432,6 +439,220 @@ namespace ps2_stubs
             bool m_seenKeyframe = false;
         };
 
+        // [fmvaudio] TWR-16: decodes SPU2 ADPCM from PSS PES payloads and pushes PCM to
+        // PS2AudioBackend via onStreamPcm(kFmvStreamId).
+        //
+        // Warriors interleaves stereo as alternating 2048-byte groups (L / R / L / R …).
+        // Two separate mono AVCodecContexts keep per-channel predictor state isolated.
+        // Set PS2X_FMVMONO=1 to feed all bytes as a single mono stream for quick diagnostics.
+        class MpegPssAudioDecoder
+        {
+        public:
+            MpegPssAudioDecoder()  = default;
+            ~MpegPssAudioDecoder() { reset(); }
+            MpegPssAudioDecoder(const MpegPssAudioDecoder &) = delete;
+            MpegPssAudioDecoder &operator=(const MpegPssAudioDecoder &) = delete;
+
+            void feed(const uint8_t *data, size_t size)
+            {
+                if (!data || size == 0 || !ensureInitialized())
+                    return;
+                m_pending.insert(m_pending.end(), data, data + size);
+                drainPending();
+            }
+
+            void flush()
+            {
+                if (!m_initialized)
+                    return;
+                emitAvailable(true);
+                m_pending.clear();
+                m_pcmL.clear();
+                m_pcmR.clear();
+                m_nextIsLeft = true;
+            }
+
+        private:
+            static constexpr size_t   kGroupBytes = 2048u; // SPU2 stereo interleave granularity
+            static constexpr size_t   kBlockBytes = 16u;   // one ADPCM PSX block = 28 samples
+            static constexpr uint32_t kSampleRate = 44100u;
+            static constexpr size_t   kEmitMin    = 1024u; // samples before pushing to backend
+
+            bool ensureInitialized()
+            {
+                if (m_initialized)
+                    return true;
+
+                static const bool s_mono = []() {
+                    const char *v = std::getenv("PS2X_FMVMONO");
+                    return v && v[0] && v[0] != '0';
+                }();
+                m_monoMode = s_mono;
+
+                configureFfmpegLogLevel();
+
+                const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_ADPCM_PSX);
+                if (!codec)
+                {
+                    std::cerr << "[MPEG] ADPCM PSX decoder not found in FFmpeg." << std::endl;
+                    return false;
+                }
+
+                m_pkt = av_packet_alloc();
+                m_frm = av_frame_alloc();
+                if (!m_pkt || !m_frm)
+                {
+                    reset();
+                    return false;
+                }
+
+                if (!allocCtx(codec, m_ctxL) || (!m_monoMode && !allocCtx(codec, m_ctxR)))
+                {
+                    std::cerr << "[MPEG] failed to open ADPCM PSX decoder." << std::endl;
+                    reset();
+                    return false;
+                }
+
+                m_initialized = true;
+                std::fprintf(stderr, "[fmvaudio] decoder ready (mode=%s, groupBytes=%zu)\n",
+                             m_monoMode ? "mono" : "stereo-2048", kGroupBytes);
+                return true;
+            }
+
+            static bool allocCtx(const AVCodec *codec, AVCodecContext *&ctx)
+            {
+                ctx = avcodec_alloc_context3(codec);
+                if (!ctx)
+                    return false;
+                av_channel_layout_default(&ctx->ch_layout, 1);
+                ctx->sample_rate = static_cast<int>(kSampleRate);
+                ctx->block_align = static_cast<int>(kBlockBytes);
+                if (avcodec_open2(ctx, codec, nullptr) < 0)
+                {
+                    avcodec_free_context(&ctx);
+                    return false;
+                }
+                return true;
+            }
+
+            void drainPending()
+            {
+                if (m_monoMode)
+                {
+                    const size_t usable = (m_pending.size() / kBlockBytes) * kBlockBytes;
+                    for (size_t i = 0; i < usable; i += kBlockBytes)
+                        decodeBlockInto(m_ctxL, m_pending.data() + i, m_pcmL);
+                    m_pending.erase(m_pending.begin(),
+                                    m_pending.begin() + static_cast<std::ptrdiff_t>(usable));
+                    emitAvailable(false);
+                    return;
+                }
+                while (m_pending.size() >= kGroupBytes)
+                {
+                    processGroup(m_nextIsLeft);
+                    m_nextIsLeft = !m_nextIsLeft;
+                }
+                emitAvailable(false);
+            }
+
+            void processGroup(bool isLeft)
+            {
+                AVCodecContext         *ctx = isLeft ? m_ctxL : m_ctxR;
+                std::vector<int16_t>  &dst = isLeft ? m_pcmL  : m_pcmR;
+                for (size_t i = 0u; i + kBlockBytes <= kGroupBytes; i += kBlockBytes)
+                    decodeBlockInto(ctx, m_pending.data() + i, dst);
+                m_pending.erase(m_pending.begin(),
+                                m_pending.begin() + static_cast<std::ptrdiff_t>(kGroupBytes));
+            }
+
+            void decodeBlockInto(AVCodecContext *ctx, const uint8_t *block, std::vector<int16_t> &dst)
+            {
+                av_packet_unref(m_pkt);
+                if (av_new_packet(m_pkt, static_cast<int>(kBlockBytes)) < 0)
+                    return;
+                std::memcpy(m_pkt->data, block, kBlockBytes);
+                if (avcodec_send_packet(ctx, m_pkt) < 0)
+                {
+                    av_packet_unref(m_pkt);
+                    return;
+                }
+                av_packet_unref(m_pkt);
+                while (true)
+                {
+                    const int ret = avcodec_receive_frame(ctx, m_frm);
+                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                        break;
+                    if (ret < 0)
+                        break;
+                    if (m_frm->format == AV_SAMPLE_FMT_S16 && m_frm->nb_samples > 0)
+                    {
+                        const auto *s = reinterpret_cast<const int16_t *>(m_frm->data[0]);
+                        dst.insert(dst.end(), s, s + m_frm->nb_samples);
+                    }
+                    av_frame_unref(m_frm);
+                }
+            }
+
+            void emitAvailable(bool forceAll)
+            {
+                if (!g_mpegRuntime)
+                    return;
+
+                if (m_monoMode)
+                {
+                    if (m_pcmL.empty() || (!forceAll && m_pcmL.size() < kEmitMin))
+                        return;
+                    g_mpegRuntime->audioBackend().onStreamPcm(
+                        kFmvStreamId, m_pcmL.data(),
+                        static_cast<uint32_t>(m_pcmL.size()), kSampleRate);
+                    m_pcmL.clear();
+                    return;
+                }
+
+                const size_t canEmit = std::min(m_pcmL.size(), m_pcmR.size());
+                if (canEmit == 0 || (!forceAll && canEmit < kEmitMin))
+                    return;
+
+                std::vector<int16_t> inter;
+                inter.reserve(canEmit * 2u);
+                for (size_t i = 0; i < canEmit; ++i)
+                {
+                    inter.push_back(m_pcmL[i]);
+                    inter.push_back(m_pcmR[i]);
+                }
+                g_mpegRuntime->audioBackend().onStreamPcm(
+                    kFmvStreamId, inter.data(),
+                    static_cast<uint32_t>(inter.size()), kSampleRate);
+                m_pcmL.erase(m_pcmL.begin(), m_pcmL.begin() + static_cast<std::ptrdiff_t>(canEmit));
+                m_pcmR.erase(m_pcmR.begin(), m_pcmR.begin() + static_cast<std::ptrdiff_t>(canEmit));
+            }
+
+            void reset()
+            {
+                if (m_ctxL) { avcodec_free_context(&m_ctxL); }
+                if (m_ctxR) { avcodec_free_context(&m_ctxR); }
+                if (m_pkt)  { av_packet_free(&m_pkt); }
+                if (m_frm)  { av_frame_free(&m_frm); }
+                m_pending.clear();
+                m_pcmL.clear();
+                m_pcmR.clear();
+                m_nextIsLeft  = true;
+                m_initialized = false;
+                m_monoMode    = false;
+            }
+
+            AVCodecContext       *m_ctxL = nullptr;
+            AVCodecContext       *m_ctxR = nullptr;
+            AVPacket             *m_pkt  = nullptr;
+            AVFrame              *m_frm  = nullptr;
+            std::vector<uint8_t>  m_pending;
+            std::vector<int16_t>  m_pcmL;
+            std::vector<int16_t>  m_pcmR;
+            bool m_nextIsLeft  = true;
+            bool m_initialized = false;
+            bool m_monoMode    = false;
+        };
+
         struct MpegRegisteredCallback
         {
             uint32_t type = 0u;
@@ -464,6 +685,7 @@ namespace ps2_stubs
             bool hasLastFrame = false;
             MpegDecodedFrame lastFrame;
             std::unique_ptr<MpegFfmpegDecoder> decoder;
+            std::unique_ptr<MpegPssAudioDecoder> audioDecoder; // [fmvaudio] TWR-16
         };
 
         struct MpegStreamCallbackEvent
@@ -1115,6 +1337,14 @@ namespace ps2_stubs
                             static_cast<uint32_t>(packetEnd - payloadStart),
                             callbackEvents);
                     }
+                    // [fmvaudio] TWR-16: decode SPU2 ADPCM natively and push PCM to SDL2.
+                    if (payloadStart < packetEnd)
+                    {
+                        if (!playback.audioDecoder)
+                            playback.audioDecoder = std::make_unique<MpegPssAudioDecoder>();
+                        playback.audioDecoder->feed(
+                            buffer.data() + payloadStart, packetEnd - payloadStart);
+                    }
                 }
 
                 erasePssPrefix(playback, packetEnd);
@@ -1128,6 +1358,8 @@ namespace ps2_stubs
             playback.streamEnded = true;
             playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
             flushDecoderIfEnded(playback);
+            if (playback.audioDecoder) // [fmvaudio] flush remaining PCM to SDL2
+                playback.audioDecoder->flush();
             if (const char *v = std::getenv("PS2X_MOVIEPROBE"); v && v[0] && v[0] != '0')
                 std::cerr << "[movprobe] MPEG finishPlaybackStream mpeg=0x" << std::hex << mpegAddr
                           << std::dec << " framesLeft=" << playback.decodedFrames.size() << std::endl;
@@ -1945,6 +2177,7 @@ namespace ps2_stubs
         {
             PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            g_mpegRuntime = runtime; // [fmvaudio] expose runtime for MpegPssAudioDecoder
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
             consumed = appendGuestBytes(mpegAddr, playback, rdram, dataAddr, byteCount, callbackEvents);
             decodedCount = playback.decodedFrames.size();
@@ -1997,6 +2230,7 @@ namespace ps2_stubs
             // This prevents an ABBA deadlock with sceMpegGetPicture on thread 5, need investigation on other games
             PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            g_mpegRuntime = runtime; // [fmvaudio] expose runtime for MpegPssAudioDecoder
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
             consumed = appendGuestRingBytes(
                 mpegAddr,

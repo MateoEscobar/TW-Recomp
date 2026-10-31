@@ -868,6 +868,8 @@ void PS2AudioBackend::serviceStreams()
             }
             return 1u;
         }();
+        // [fmvaudio] PSS FMV stream (TWR-16) always carries stereo-interleaved PCM.
+        const uint32_t streamChannels = (id == 0xF1u) ? 2u : s_channels;
 
         const size_t chunkFrames = monoChunkFrames();
         if (!st.opened)
@@ -877,13 +879,13 @@ void PS2AudioBackend::serviceStreams()
             // dropouts (~10/sec) that sound like pause/unpause stutter. The sub-buffer size
             // is pinned at open and we always hand over exactly that many frames.
             const uint32_t depth = monoDepth();
-            m_impl->streams[id] = ps2x_audio::openStream(st.sampleRate, s_channels,
+            m_impl->streams[id] = ps2x_audio::openStream(st.sampleRate, streamChannels,
                                                          static_cast<uint32_t>(chunkFrames), depth);
             st.opened = true;
             m_impl->deviceProgress[id] = {};
             m_impl->deviceProgress[id].primingSlots = depth;   // every sub-buffer starts empty
             std::fprintf(stderr, "[sndplay] opened stream=%u rate=%u channels=%u chunk=%zu x%u\n",
-                         id, st.sampleRate, s_channels, chunkFrames, depth);
+                         id, st.sampleRate, streamChannels, chunkFrames, depth);
         }
         const ps2x_audio::Stream s = m_impl->streams[id];
 
@@ -909,10 +911,10 @@ void PS2AudioBackend::serviceStreams()
             }
             return 100;
         }();
-        if (!st.ring.empty() && (st.ring.size() % (chunkFrames * s_channels)) != 0u &&
+        if (!st.ring.empty() && (st.ring.size() % (chunkFrames * streamChannels)) != 0u &&
             ps2xStreamIdleMs(id) >= s_idleMs)
         {
-            const size_t chunk = chunkFrames * s_channels;
+            const size_t chunk = chunkFrames * streamChannels;
             const size_t padded = ((st.ring.size() + chunk - 1u) / chunk) * chunk;
             static std::atomic<uint32_t> p{0};
             const uint32_t k = p.fetch_add(1);
@@ -944,8 +946,8 @@ void PS2AudioBackend::serviceStreams()
             // The idle case is the one-shot above: the sound is already complete, so the
             // cushion has no underrun to protect against and waiting for it means silence.
             const bool complete = ps2xStreamIdleMs(id) >= s_idleMs;
-            const size_t need = (st.forceStart || complete) ? chunkFrames * s_channels
-                                                            : s_cushion * s_channels;
+            const size_t need = (st.forceStart || complete) ? chunkFrames * streamChannels
+                                                            : s_cushion * streamChannels;
             if (st.ring.size() < need)
                 continue;
             ps2x_audio::playStream(s);
@@ -960,7 +962,7 @@ void PS2AudioBackend::serviceStreams()
         {
             // Only ever hand over a COMPLETE sub-buffer; a short feed is what causes the
             // stutter. If we do not have a full one yet, leave it for the next frame.
-            const size_t chunk = chunkFrames * s_channels;
+            const size_t chunk = chunkFrames * streamChannels;
             if (st.ring.size() < chunk)
                 break;
             auto &dev = m_impl->deviceProgress[id];
