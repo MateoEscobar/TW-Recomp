@@ -21,6 +21,22 @@ patch_cop0 = true
 patch_cache = true
 
 # -----------------------------------------------------------------------
+# Video settings (TWR-15: widescreen patch + resolution scaling)
+# -----------------------------------------------------------------------
+# [video]
+# Enable 16:9 widescreen (patches camera projection + HUD layout).
+# widescreen = false
+#
+# Internal render scale 1x–4x. Auto-derives window size if window_w/window_h
+# are not set. 4:3 sizes: 1x=640x480, 2x=1280x960, 3x=1920x1440, 4x=2560x1920.
+# 16:9 sizes: 1x=640x360, 2x=1280x720, 3x=1920x1080, 4x=2560x1440.
+# render_scale = 2
+#
+# Override window dimensions explicitly (disables auto-derivation above).
+# window_w = 1280
+# window_h = 720
+
+# -----------------------------------------------------------------------
 # RenderWare 3.x stubs — all rwXxx / rpXxx functions delegated to the
 # native PC renderer. Addresses verified against SLUS_214.72 (TODO: fill
 # after ps2xAnalyzer run in TWR-6).
