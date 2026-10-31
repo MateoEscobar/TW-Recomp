@@ -35,6 +35,7 @@ cmake_install.cmake
 Makefile
 *.cmake
 !CMakeLists.txt
+!ps2xRuntime/cmake/*.cmake
 
 # Logs
 logs/
