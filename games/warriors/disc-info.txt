@@ -1,0 +1,67 @@
+The Warriors — Disc Information
+================================
+
+Verified disc: USA retail (NTSC)
+
+SYSTEM.CNF
+----------
+BOOT2 = cdrom0:\SLUS_212.15;1
+VER = 1.03
+VMODE = NTSC
+
+NOTE: The disc ID is SLUS-21215 (ELF: SLUS_212.15), not SLUS-21472 as
+previously documented in early project notes.
+
+ELF
+---
+Filename : SLUS_212.15
+Size     : 4,903,976 bytes (~4.7 MB)
+SHA-256  : 1a4e1c3891c930146e39ce340ccb02918cfe917032aafcdbbbe6541f75402369
+file(1)  : ELF 32-bit LSB executable, MIPS, MIPS-III version 1 (SYSV),
+           statically linked, stripped
+
+Disc Structure
+--------------
+/
+├── SLUS_212.15          4,903,976 bytes   — PS2 ELF executable (MIPS R5900)
+├── SYSTEM.CNF                  57 bytes   — Boot configuration
+├── WARRIORS.DIR           128,428 bytes   — Game data directory/index
+├── WARRIORS.WAD     1,495,371,776 bytes   — Main game data archive (~1.39 GB)
+├── IOP/                                   — IOP audio data
+│   ├── BFW.SND      1,402,861,568 bytes   — Sound effects bank (~1.31 GB, Miles Sound System)
+│   └── MUSIC.SND      960,063,488 bytes   — Music bank (~0.89 GB, Miles Sound System)
+├── MODULES/                               — IOP kernel modules (IRX)
+│   ├── IOP.IRX              143,132 bytes
+│   ├── IOPRP300.IMG         275,345 bytes
+│   ├── LIBSD.IRX             28,661 bytes
+│   ├── MCMAN.IRX             95,909 bytes
+│   ├── MCSERV.IRX             7,417 bytes
+│   ├── PADMAN.IRX            44,869 bytes
+│   └── SIO2MAN.IRX            6,641 bytes
+└── PSS/                                   — Cutscene videos (Bink Video .BIK format)
+    ├── L1_IN.BIK             58,558,968 bytes
+    ├── L31_IN.BIK            16,767,680 bytes
+    ├── L31_OUT.BIK           19,479,396 bytes
+    ├── L34_OUT.BIK           22,788,160 bytes
+    ├── L51_IN.BIK           140,089,108 bytes
+    ├── L52_IN.BIK            22,345,988 bytes
+    ├── L54_IN.BIK            15,270,360 bytes
+    ├── L81_OUT.BIK           11,607,724 bytes
+    ├── L84_OUT.BIK              139,516 bytes
+    ├── L87_OUT.BIK           12,819,700 bytes
+    ├── L99_IN.BIK            21,897,112 bytes
+    ├── L9_IN.BIK             34,138,400 bytes
+    ├── L9_OUT.BIK             4,933,168 bytes
+    ├── LOGO.BIK                 303,228 bytes
+    ├── PLOGO.BIK              3,560,952 bytes
+    └── TRAILER.BIK           25,638,616 bytes
+
+Notes for Future Tickets
+-------------------------
+TWR-11 (ps2xAnalyzer): target ELF is SLUS_212.15, extracted with scripts/extract_iso.py
+TWR-12 (ps2xRecomp):   same ELF filename
+TWR-13 (stubs):        IRX module list above shows the IOP services in use
+                       (LIBSD=sound, MCMAN/MCSERV=memory card, PADMAN=gamepad, SIO2MAN=SIO2 bus)
+TWR-16 (cutscenes):    videos are Bink Video (.BIK), NOT PSS/STR — use Bink SDK or RAD tools,
+                       or a FOSS Bink decoder (e.g. FFmpeg libavcodec bink decoder)
+TWR-17 (audio):        audio data is in IOP/BFW.SND and IOP/MUSIC.SND (Miles Sound System format)
