@@ -55,6 +55,7 @@ extern "C" unsigned long long ps2xWinThreadCpuNs();
 #include "runtime/ps2_seamprobe.h"  // [seamprobe]
 #include "runtime/ps2x_achieve.h"  // [ach]
 #include "runtime/ps2x_notify.h"   // [notify] the drop box
+#include "rw/rw_renderer.h"         // [TWR-14] RW 3.x OpenGL renderer (SLUS_212.15)
 
 // [notify] Where the drop box lives: <exeDir>/savedata, the same directory settings.toml is in.
 // The CWD is tried first because the front-end runs with the deploy as its working directory and a
@@ -8340,6 +8341,18 @@ namespace
     }
 
     PS2_REGISTER_GAME_OVERRIDE("TW Warriors IOP boot bypass", "SLUS_212.15", 0u, 0u, &applyTwWarriorsBootBypass)
+
+    // [TWR-14] RW renderer init — called at boot to bring up the OpenGL renderer infrastructure.
+    // RW function addresses for replaceFunction hooks will be wired once Ghidra pattern-matching
+    // yields the symbols (see function-analysis.md: 0 RW symbols identified as of TWR-11).
+    void applyTwWarriorsRenderer(PS2Runtime & /*runtime*/)
+    {
+        if (rw_renderer::init())
+            std::cerr << "[game_overrides] TW Warriors: RW renderer ready" << std::endl;
+        else
+            std::cerr << "[game_overrides] TW Warriors: rw_renderer::init() deferred (GL context not ready yet)" << std::endl;
+    }
+    PS2_REGISTER_GAME_OVERRIDE("TW Warriors RW renderer init", "SLUS_212.15", 0u, 0u, &applyTwWarriorsRenderer)
 }
 
 // [netmenu] Play one of the game's OWN SEs (system bank A) from the host menu -- no decoded WAVs.
