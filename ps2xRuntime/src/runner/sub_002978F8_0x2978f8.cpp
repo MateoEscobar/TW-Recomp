@@ -336,7 +336,11 @@ label_2979d8:
     SET_GPR_U64(ctx, 4, (uint64_t)GPR_U64(ctx, 17) + (uint64_t)GPR_U64(ctx, 0));
     // 0x2979e0: 0x3c013f40  lui         $at, 0x3F40
     ctx->pc = 0x2979e0u;
-    SET_GPR_S32(ctx, 1, (int32_t)((uint32_t)16192 << 16));
+    // [TWR-15] widescreen HUD projection correction — use g_ps2xWsLui instead of 0.75f
+    // This recompiled instruction is manually patched; do not regenerate without re-applying.
+    { extern float g_ps2xWsLui;
+      uint32_t bits; std::memcpy(&bits, &g_ps2xWsLui, sizeof(bits));
+      SET_GPR_S32(ctx, 1, (int32_t)bits); }
     // 0x2979e4: 0x44816000  mtc1        $at, $f12
     ctx->pc = 0x2979e4u;
     { uint32_t bits = GPR_U32(ctx, 1); std::memcpy(&ctx->f[12], &bits, sizeof(bits)); }
@@ -410,7 +414,11 @@ label_297a10:
     { int64_t result = (int64_t)GPR_S32(ctx, 2) * (int64_t)GPR_S32(ctx, 4); ctx->lo = (uint64_t)(int64_t)(int32_t)result; ctx->hi = (uint64_t)(int64_t)(int32_t)(result >> 32); SET_GPR_S32(ctx, 5, (int32_t)result); }
     // 0x297a1c: 0x3c013f40  lui         $at, 0x3F40
     ctx->pc = 0x297a1cu;
-    SET_GPR_S32(ctx, 1, (int32_t)((uint32_t)16192 << 16));
+    // [TWR-15] widescreen HUD projection correction — use g_ps2xWsLui instead of 0.75f
+    // This recompiled instruction is manually patched; do not regenerate without re-applying.
+    { extern float g_ps2xWsLui;
+      uint32_t bits; std::memcpy(&bits, &g_ps2xWsLui, sizeof(bits));
+      SET_GPR_S32(ctx, 1, (int32_t)bits); }
     // 0x297a20: 0x44816000  mtc1        $at, $f12
     ctx->pc = 0x297a20u;
     { uint32_t bits = GPR_U32(ctx, 1); std::memcpy(&ctx->f[12], &bits, sizeof(bits)); }
