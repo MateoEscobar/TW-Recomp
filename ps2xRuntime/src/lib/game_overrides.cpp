@@ -2,6 +2,7 @@
 #include "ps2_waitprof.h"   // [waitprof]
 #include "runtime/ps2_statesync.h"   // [statesync]
 extern "C" bool ps2xAudioFeedOn();   // [rollback] ps2_runtime.cpp: false while re-simulating / fast-forwarding (no device feed)
+extern "C" const char *ps2xExeDirC();   // main.cpp: <exeDir> (honors PS2X_EXEDIR)
 #include "ps2_runtime_macros.h"
 #include "game_overrides.h"
 #include "ps2_runtime.h"
@@ -70,7 +71,6 @@ extern "C" const char *ps2xDropBoxDir()
         const std::filesystem::path cwd = std::filesystem::current_path() / "savedata";
         if (std::filesystem::is_directory(cwd, ec) && !ec)
             return cwd.string();
-        extern const char *ps2xExeDirC();   // main.cpp: <exeDir> (honors PS2X_EXEDIR)
         const char *xd = ps2xExeDirC();
         if (xd && xd[0])
             return (std::filesystem::path(xd) / "savedata").string();
