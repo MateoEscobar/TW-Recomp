@@ -5,22 +5,50 @@
 #include <cstdint>
 #include "ps2_runtime.h"
 
+// GCC/Clang: __attribute__((weak)) allows a strong definition to override.
+// MSVC: __declspec(selectany) on initialized data gives "pick one" semantics for
+// variables (closest portable equivalent). For functions, no attribute is needed —
+// the linker resolves to the strong definition when it exists.
+#ifdef _MSC_VER
+#  define PS2X_WEAK_VAR   __declspec(selectany)
+#  define PS2X_WEAK_CONST __declspec(selectany)
+#  define PS2X_WEAK_FN    /* no MSVC equivalent; linker picks strong definition */
+#else
+#  define PS2X_WEAK_VAR   __attribute__((weak))
+#  define PS2X_WEAK_CONST __attribute__((weak))
+#  define PS2X_WEAK_FN    __attribute__((weak))
+#endif
+
 // --- Recompiled EE function table (provided by generated src/runner/*.cpp) ---
 // `extern` is required: const variables have internal linkage by default in C++,
 // and __attribute__((weak)) requires external linkage.
+#ifdef _MSC_VER
+extern __declspec(selectany) const uint32_t g_ps2RecompiledFunctionTableBase     = 0;
+extern __declspec(selectany) const uint32_t g_ps2RecompiledFunctionTableEnd       = 0;
+extern __declspec(selectany) const uint32_t g_ps2RecompiledFunctionTableSlotCount = 0;
+__declspec(selectany) PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[1] = {nullptr};
+#else
 extern const uint32_t g_ps2RecompiledFunctionTableBase     __attribute__((weak)) = 0;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd       __attribute__((weak)) = 0;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount __attribute__((weak)) = 0;
 __attribute__((weak)) PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[1] = {nullptr};
+#endif
 
 // --- Recompiled overlay function table (provided by generated src/runner_overlay/*.cpp) ---
+#ifdef _MSC_VER
+extern __declspec(selectany) const uint32_t g_ps2OverlayFunctionTableBase     = 0;
+extern __declspec(selectany) const uint32_t g_ps2OverlayFunctionTableEnd       = 0;
+extern __declspec(selectany) const uint32_t g_ps2OverlayFunctionTableSlotCount = 0;
+__declspec(selectany) PS2Runtime::RecompiledFunction g_ps2OverlayFunctionTable[1] = {nullptr};
+#else
 extern const uint32_t g_ps2OverlayFunctionTableBase     __attribute__((weak)) = 0;
 extern const uint32_t g_ps2OverlayFunctionTableEnd       __attribute__((weak)) = 0;
 extern const uint32_t g_ps2OverlayFunctionTableSlotCount __attribute__((weak)) = 0;
 __attribute__((weak)) PS2Runtime::RecompiledFunction g_ps2OverlayFunctionTable[1] = {nullptr};
+#endif
 
 #if !defined(PS2X_HAVE_SEAMVK)
 // --- Seam timing hooks (provided by ps2_seamgs.cpp when PS2X_HAVE_SEAMVK) ---
-extern "C" __attribute__((weak)) void ps2xSeamFlipStamp(unsigned long long, unsigned long long) {}
-extern "C" __attribute__((weak)) void ps2xSeamTickMark(unsigned long long) {}
+extern "C" PS2X_WEAK_FN void ps2xSeamFlipStamp(unsigned long long, unsigned long long) {}
+extern "C" PS2X_WEAK_FN void ps2xSeamTickMark(unsigned long long) {}
 #endif
