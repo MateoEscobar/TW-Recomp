@@ -3925,7 +3925,6 @@ void PS2SettingsOverlay::drawAboutTab()
     {
         ImGui::TextWrapped("ran-j/PS2Recomp - static recompiler (upstream, GPL-3.0)");
         ImGui::TextWrapped("z3xox/BT3-Recomp - frontend & install wizard (reference port)");
-        ImGui::TextWrapped("Arntzen Software - paraLLEl-GS (LGPL-3.0-or-later)");
         ImGui::TextWrapped("re3/reVC - open-source Rockstar engine reference");
         ImGui::TextWrapped("Russo One - typeface (SIL Open Font License)");
         ImGui::Spacing();
