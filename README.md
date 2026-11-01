@@ -154,7 +154,7 @@ regenerate the recompiled sources from your own disc image.
 | Ticket | Description | Status |
 |--------|-------------|--------|
 | TWR-17 | Miles Sound System → OpenAL/miniaudio | ⏳ Pending |
-| TWR-18 | DualShock 2 → SDL2 GameController | ⏳ Pending |
+| TWR-18 | DualShock 2 → SDL2 GameController | ✅ Done |
 | TWR-19 | Memory card save/load → .sav files | ⏳ Pending |
 
 ### Epic TWR-5 — Launcher & Distribution
