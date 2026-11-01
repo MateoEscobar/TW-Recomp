@@ -524,7 +524,12 @@ namespace ps2_stubs
                 ctx = avcodec_alloc_context3(codec);
                 if (!ctx)
                     return false;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 37, 100)
                 av_channel_layout_default(&ctx->ch_layout, 1);
+#else
+                ctx->channels = 1;
+                ctx->channel_layout = AV_CH_LAYOUT_MONO;
+#endif
                 ctx->sample_rate = static_cast<int>(kSampleRate);
                 ctx->block_align = static_cast<int>(kBlockBytes);
                 if (avcodec_open2(ctx, codec, nullptr) < 0)

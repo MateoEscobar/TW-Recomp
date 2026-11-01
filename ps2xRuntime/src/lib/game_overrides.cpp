@@ -1,3 +1,4 @@
+#include <bit>
 #include "ps2_waitprof.h"   // [waitprof]
 #include "runtime/ps2_statesync.h"   // [statesync]
 extern "C" bool ps2xAudioFeedOn();   // [rollback] ps2_runtime.cpp: false while re-simulating / fast-forwarding (no device feed)
@@ -2358,7 +2359,7 @@ namespace
             seDrop(bank, idx, "bank is not a single slot bit");
             return;
         }
-        const uint32_t slot = static_cast<uint32_t>(__builtin_ctz(bank));
+        const uint32_t slot = static_cast<uint32_t>(std::countr_zero(bank));
         {
             std::vector<uint8_t> hdrSnap;
             uint32_t hdrAddr = 0u;
@@ -8363,7 +8364,7 @@ extern "C" int ps2xMenuSePlay(int bank, int idx)
     if (!g_ps2xMenuRdram || !g_ps2xMenuRuntime) return 0;
     const uint32_t b = (bank > 0) ? (uint32_t)bank : 1u;
     if (b == 0u || (b & (b - 1u)) != 0u) return 0;
-    const uint32_t slot = (uint32_t)__builtin_ctz(b);
+    const uint32_t slot = (uint32_t)std::countr_zero(b);
     {
         std::lock_guard<std::mutex> lk(g_seBlobM);
         if (slot >= kSeSlots || g_seSlot[slot].hdr.empty() || g_seSlot[slot].blob.empty())
