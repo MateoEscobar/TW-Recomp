@@ -140,12 +140,11 @@ namespace
 }
 
 // --- "Capsule HUD" accent palette -------------------------------------------
-// Dark near-black tech panel with a single orange accent (still Dragon Ball Z's
-// orange/gold, just applied in a flatter, squared-off, HUD-readout style instead
-// of the earlier rounded "energy glow" look).
+// Dark near-black tech panel with a single steel-blue accent (The Warriors'
+// street-gang palette, applied in a flat, squared-off, HUD-readout style).
 namespace
 {
-    constexpr float DBZ_R = 1.00f, DBZ_G = 0.62f, DBZ_B = 0.10f;   // HUD orange
+    constexpr float TW_R = 0.18f, TW_G = 0.52f, TW_B = 0.88f;   // Warriors steel blue
     constexpr float GOLD_R = 1.00f, GOLD_G = 0.80f, GOLD_B = 0.30f;
 
     ImVec4 dbz(float r, float g, float b, float a = 1.0f)
@@ -160,7 +159,7 @@ namespace
     constexpr float kSurfR = 0.000f, kSurfG = 0.106f, kSurfB = 0.224f;   // 27/255, 57/255
     ImVec4 surface(float a = 1.0f) { return dbz(kSurfR, kSurfG, kSurfB, a); }
 
-    ImVec4 accent(float a = 1.0f) { return dbz(DBZ_R, DBZ_G, DBZ_B, a); }
+    ImVec4 accent(float a = 1.0f) { return dbz(TW_R, TW_G, TW_B, a); }
     ImVec4 gold(float a = 1.0f)   { return dbz(GOLD_R, GOLD_G, GOLD_B, a); }
 
     void pushDbzTheme()
@@ -3908,7 +3907,7 @@ void PS2SettingsOverlay::drawAboutTab()
     ImGui::Spacing();
 
     sectionHeader("ABOUT");
-    ImGui::TextWrapped("Dragon Ball Z: Budokai Tenkaichi 3 - Recompiled");
+    ImGui::TextWrapped("The Warriors \xe2\x80\x94 Recompiled");
     ImGui::TextWrapped(
         "A statically recompiled, native PC port built on PS2Recomp. The game's MIPS code "
         "is translated to C++ at build time from your own disc image; no game content is "
@@ -3916,36 +3915,26 @@ void PS2SettingsOverlay::drawAboutTab()
     ImGui::Spacing();
 
     sectionHeader("DEVELOPERS");
-    ImGui::TextWrapped("z3xox - owner / lead developer");
-    ImGui::TextDisabled("  recompiler, the runtime core (EE/GS/VU1/scheduler, the GS replay), the"
-                        " native Vulkan renderer, game overrides, generators");
-    ImGui::TextWrapped("RexxColder - supporter / collaborator");
-    ImGui::TextDisabled("  the OpenGL renderer, optimisation (perf/async), front-end and install"
-                        " wizard, native IOP modules, input & gamepads, build/release, deploy,"
-                        " game data, texture packs");
-    ImGui::TextWrapped("valenvivaldi - collaborator");
-    ImGui::TextDisabled("  port macOS arm64, packaging, audio");
-    ImGui::TextWrapped("KaibaSammy - collaborator (mods)");
-    ImGui::TextDisabled("  Mod Manager project, mod design, mod support");
+    ImGui::TextWrapped("MateoEscobar - owner / lead developer");
+    ImGui::TextDisabled("  recompiler adaptation, runtime overrides, frontend & install wizard,"
+                        " audio (Miles Sound System \xe2\x86\x92 OpenAL/miniaudio), build & deploy");
     ImGui::Spacing();
 
     sectionHeader("CREDITS");
     if (ImGui::BeginChild("##about_third", ImVec2(-1, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY))   // [gpadbox] content-sized
     {
         ImGui::TextWrapped("ran-j/PS2Recomp - static recompiler (upstream, GPL-3.0)");
-        ImGui::TextWrapped("ViveTheModder - NTSC-U AFS file lists (Apache-2.0)");
+        ImGui::TextWrapped("z3xox/BT3-Recomp - frontend & install wizard (reference port)");
         ImGui::TextWrapped("Arntzen Software - paraLLEl-GS (LGPL-3.0-or-later)");
-        ImGui::TextWrapped("Sal9im - \"4K 2D Textures Lite\" pack (GBATemp). Not distributed: drop"
-                           " it in data/Textures/. The DXT5 encoding and the runtime replacement"
-                           " work are RexxColder's.");
+        ImGui::TextWrapped("re3/reVC - open-source Rockstar engine reference");
         ImGui::TextWrapped("Russo One - typeface (SIL Open Font License)");
         ImGui::Spacing();
     }
     ImGui::EndChild();
 
     ImGui::Spacing();
-    ImGui::TextDisabled("GPL-3.0. Not affiliated with Spike or Bandai Namco.");
-    ImGui::TextDisabled("github.com/z3xox/Warriors-Recomp");
+    ImGui::TextDisabled("GPL-3.0. Not affiliated with Rockstar Games.");
+    ImGui::TextDisabled("github.com/MateoEscobar/TW-Recomp");
 }
 
 void PS2SettingsOverlay::dumpSettingsToFile()

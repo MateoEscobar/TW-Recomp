@@ -636,7 +636,7 @@ int main(int argc, char *argv[])
             frontend::FeConfig cfg;
             // Single source of truth for the product name in C++. Keep it byte-identical to
             // PRODUCT_NAME in games/warriors/setup.py, which names the deployed executable.
-            cfg.title = "Dragon Ball Z Budokai Tenkaichi 3 - Recompiled";
+            cfg.title = "The Warriors \xe2\x80\x94 Recompiled";
             cfg.exeDir = getExecutableDirectory().string();
             if (const char *def = std::getenv("PS2X_DEFAULT_BOOT_ELF"))
                 cfg.defaultElf = def;

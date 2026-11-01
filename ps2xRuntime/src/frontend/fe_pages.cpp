@@ -33,7 +33,7 @@ namespace
     constexpr int kResolutionCount = 10;
     const char *const kCustomResolution = "Custom";
 
-    // SLUS_214.72 (US) -- must stay in sync with games/warriors/setup.py.
+    // SLUS_212.15 (US) -- must stay in sync with games/warriors/setup.py.
     // The expected boot-ELF digest lives in fe_iso9660.h next to the code that verifies the
 // dump: one constant, so the status page and the wizard cannot disagree.
 using DiscVerify::kExpectedDiscElfSha256;
@@ -69,7 +69,7 @@ using DiscVerify::kExpectedDiscElfSha256;
 
     DataState verifyInstalledData(const std::filesystem::path &dataDir)
     {
-        const std::filesystem::path boot = dataDir / "SLUS_214.72";
+        const std::filesystem::path boot = dataDir / "SLUS_212.15";
         std::error_code ec;
         if (!std::filesystem::exists(boot, ec))
             return DataState::Missing;
@@ -768,12 +768,12 @@ namespace frontend
         {   // [warriorssave] Install the progressed memory-card save (bug 8). The runtime's mc* layer is
             // a stub, so a save the game writes itself is 99.2% zeros -- nothing persists, and
             // with no progress on the card nothing ever unlocks. This ships a real save extracted
-            // from an Mcd001.ps2 (the BSLUS-21472TW entry) and drops it over the card dir.
+            // from an Mcd001.ps2 (the BSLUS-21215 entry) and drops it over the card dir.
             // The previous save is kept as .bak next to it. Env PS2X_WarriorsSAVE=0 hides the section.
             static const bool s_showSave = [](){ const char *v = std::getenv("PS2X_WarriorsSAVE"); return !(v && v[0] == (char)48); }();
-            const std::filesystem::path saveSrc = ctx.exeDir / "saves" / "BSLUS-21472TW" / "BSLUS-21472TW";
-            const std::filesystem::path cardDir = ctx.exeDir / "savedata" / "BSLUS-21472TW";
-            const std::filesystem::path cardFile = cardDir / "BSLUS-21472TW";
+            const std::filesystem::path saveSrc = ctx.exeDir / "saves" / "BSLUS-21215" / "BSLUS-21215";
+            const std::filesystem::path cardDir = ctx.exeDir / "savedata" / "BSLUS-21215";
+            const std::filesystem::path cardFile = cardDir / "BSLUS-21215";
             if (s_showSave && fe::beginSection("COMPLETED SAVE", false,
                                                 "Copies a real save that already has story progress, "
                                                 "so you start with the match underway and the characters, "
@@ -805,7 +805,7 @@ namespace frontend
                     if (ImGui::Button("Install now", ImVec2(180.0f, 0.0f)))
                         ctx.requestSaveInstall = true;
                     ImGui::EndDisabled();
-                    fe::hint("Replaces the save in savedata/BSLUS-21472TW/ and keeps the previous "
+                    fe::hint("Replaces the save in savedata/BSLUS-21215/ and keeps the previous "
                              "as .bak next to it. The match you play from now on is NOT "
                              "saved on exit: the memory card still cannot write back, "
                              "so this is for starting with the match unlocked, "
@@ -996,35 +996,25 @@ namespace frontend
         // All fixed: the page is short and there is nothing to fold away.
         fe::sectionHeader("ABOUT");
         fe::rowLabel("Game");
-        ImGui::TextColored(fe::gold(), "Dragon Ball Z: Budokai Tenkaichi 3 Recompiled");
+        ImGui::TextColored(fe::gold(), "The Warriors \xe2\x80\x94 Recompiled");
         fe::hint("Static recompilation of the PS2 game: the MIPS code on disc is translated to "
                  "C++ and runs natively, with the PS2 hardware emulated on the host process.");
 
         fe::sectionHeader("COMPONENTS");
         fe::kv("Interface", "ImGui + SDL2 (inside the runtime)");
-        fe::kv("Graphics", "OpenGL 3.3 / Native Vulkan (engine seam) / paraLLEl-GS");
-        fe::kv("Video", "FFmpeg");
-        fe::kv("Audio", "the game's own SE/ADX engine");
+        fe::kv("Graphics", "OpenGL 3.3");
+        fe::kv("Video", "FFmpeg (Bink Video)");
+        fe::kv("Audio", "Miles Sound System \xe2\x86\x92 OpenAL/miniaudio");
         fe::kv("Pad", "SDL2 gamecontroller");
 
         fe::sectionHeader("DEVELOPERS");
-        fe::kv("z3xox", "owner / lead developer - recompiler, the runtime core "
-                        "(EE/GS/VU1/scheduler, the GS replay), the native Vulkan "
-                        "renderer, game overrides, generators");
-        fe::kv("RexxColder", "supporter / collaborator - the OpenGL renderer, optimisation "
-                             "(perf/async), front-end and install wizard, native IOP modules, "
-                             "input and gamepads, build/release, deploy, game data, texture packs");
-        fe::kv("valenvivaldi", "collaborator - macOS arm64 port, packaging, audio");
-        fe::kv("KaibaSammy", "collaborator (mods) - Mod Manager project, mod design, mod support");
+        fe::kv("MateoEscobar", "lead developer - static recompilation, runtime, game overrides, "
+                               "frontend and install wizard, build/release");
         ImGui::Spacing();
         fe::sectionHeader("CREDITS");
         fe::hint("PS2Recomp (ran-j) - static recompiler (GPL-3.0)\n"
-                 "paraLLEl-GS (Arntzen-Software) - GS backend (LGPL-3.0-or-later)\n"
-                 "Warriors-Recomp (z3xox) - this project\n"
-                 "ViveTheModder - NTSC-U AFS file lists (Apache-2.0)\n"
-                 "Sal9im - \"4K 2D Textures Lite\" pack (GBATemp), not distributed: drop it in "
-                 "data/Textures/. The DXT5 encoding and the runtime replacement work are "
-                 "RexxColder's\n"
+                 "BT3-Recomp - runtime framework reference\n"
+                 "re3/reVC (GTAmodding) - RenderWare PS2 reference (MIT)\n"
                  "Russo One - typeface (SIL Open Font License)");
     }
 }

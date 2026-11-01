@@ -282,7 +282,7 @@ namespace DiscVerify
         Iso9660 iso;
         if (!iso.open(isoPath))
             return false;
-        const Iso9660::File *slus = iso.find("SLUS_214.72");
+        const Iso9660::File *slus = iso.find("SLUS_212.15");
         if (!slus)
             return false;
 

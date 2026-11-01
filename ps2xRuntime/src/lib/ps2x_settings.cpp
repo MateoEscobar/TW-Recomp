@@ -21,7 +21,7 @@ namespace
     using ps2x_settings::kRendererSoftware;
 
     const char *kHeader =
-        "# Dragon Ball Z: Budokai Tenkaichi 3 - Recompiled\n"
+        "# The Warriors \xe2\x80\x94 Recompiled\n"
         "# User settings - written by the launcher and the in-game overlay.\n"
         "# Delete this file to reset everything to defaults.\n";
 

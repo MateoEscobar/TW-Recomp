@@ -38,7 +38,7 @@ public:
     const std::string &error() const { return m_err; }
     const std::vector<File> &files() const { return m_files; }
 
-    // Case-insensitive lookup, e.g. "SLUS_214.72" or "BIN/DBZP.BIN".
+    // Case-insensitive lookup, e.g. "SLUS_212.15" or "WARRIORS.WAD".
     const File *find(const std::string &isoPath) const;
 
     using Sink = std::function<void(const char *data, std::size_t size)>;
@@ -59,9 +59,9 @@ private:
 
 namespace DiscVerify
 {
-    // SLUS_214.72 (US release). MUST stay in sync with ELF_SHA256 in games/warriors/setup.py.
+    // SLUS_212.15 (US release). MUST stay in sync with ELF_SHA256 in games/warriors/setup.py.
     constexpr const char *kExpectedDiscElfSha256 =
-        "811188ba9b416500d921cd4d9514df0cbf42f3a41a99cf5aac5a3da37171bf99";
+        "1a4e1c3891c930146e39ce340ccb02918cfe917032aafcdbbbe6541f75402369";
 
     // Hash of the boot ELF embedded in the disc image.
     bool verifySlusFromIso(const std::string &isoPath);
