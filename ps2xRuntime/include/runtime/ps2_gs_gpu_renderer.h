@@ -279,7 +279,7 @@ public:
                                  s_hist[4], s_hist[5], s_hist[6], s_hist[7]);
             }
         }
-        for (uint32_t p = lo; p <= hi; ++p) { const uint64_t v = std::atomic_ref<uint64_t>(m_pageDrawSeq[p]).load(std::memory_order_acquire); if (v > m) m = v; }
+        for (uint32_t p = lo; p <= hi; ++p) { const uint64_t v = std::atomic_ref<uint64_t>(const_cast<uint64_t&>(m_pageDrawSeq[p])).load(std::memory_order_acquire); if (v > m) m = v; }
         return m;
     }
     uint64_t recTplEpoch() const   // [rectemplate] everything resolveTextureVersion / rtServedRead read besides GS state
