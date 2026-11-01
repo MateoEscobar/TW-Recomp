@@ -23,10 +23,10 @@ int main(int argc, char **argv)
         std::printf("  %-24s dir=%d  %llu bytes  extents=%u\n", f.path.c_str(), f.dir ? 1 : 0,
                     (unsigned long long)f.size(), (unsigned)f.extents.size());
 
-    const Iso9660::File *slus = iso.find("slus_216.78");
+    const Iso9660::File *slus = iso.find("slus_212.15");
     if (!slus)
     {
-        std::printf("FAIL: SLUS_214.72 not found\n");
+        std::printf("FAIL: SLUS_212.15 not found\n");
         return 1;
     }
     std::printf("found (case-insensitive): %s, %llu bytes\n", slus->path.c_str(),

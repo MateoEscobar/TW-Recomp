@@ -315,7 +315,7 @@ void InstallWizard::workerVerify()
         }
     }
 
-    setStatus("Verifying the disc (SLUS_214.72)...");
+    setStatus("Verifying the disc (SLUS_212.15)...");
     const bool ok = DiscVerify::verifySlusFromIso(iso);
     logInstall(std::string("verify ") + (ok ? "OK" : "FAIL") + ": " + iso +
                " sha256=" + DiscVerify::kExpectedDiscElfSha256);
@@ -374,27 +374,25 @@ void InstallWizard::workerExtract()
         m_workerRunning = false;
     };
 
-    // [modules] ISO path -> flat deploy path. The runtime resolves the disc layout, a Modules folder
-    // and the flat one (see docs/DEPLOY.md, resolveIopModulePath and configureIoPathsFromElf), so this
-    // only decides what the user sees on disk:
-    //   DATA/<x>      -> <x>        the AFS containers, flattened to the CD root
-    //   BIN/<x>       -> <x>        DBZP.BIN sits beside them; the guest asks for \BIN\DBZP.BIN and
-    //                                resolvePs2HostPath() retries by name at the CD root, so a copy
-    //                                left under Modules/BIN/ would be unreachable on the FIO path
-    //   IRX/<mod>     -> Modules/<mod>
-    //   SLUS_214.72   -> Modules/BOOT   the boot ELF travels with the modules
-    // Anything else keeps its path, which puts SYSTEM.CNF in Modules/ without needing its own case.
+    // [modules] ISO path -> flat deploy path. Warriors disc layout:
+    //   MODULES/<x>  -> Modules/<x>  IOP modules (.IRX, .IMG) — resolveIopModulePath() finds them here
+    //   IOP/<x>      -> IOP/<x>      audio banks (BFW.SND, MUSIC.SND) — path preserved
+    //   PSS/<x>      -> PSS/<x>      Bink cutscenes (.BIK) — path preserved
+    //   SLUS_212.15  -> Modules/BOOT the boot ELF travels with the modules
+    // Root files (WARRIORS.WAD, WARRIORS.DIR, SYSTEM.CNF) stay at the data root.
     static const std::string kModulesDir = "Modules";
     auto deployRelativePath = [](const std::string &isoPath) -> std::string
     {
         const std::size_t slash = isoPath.find('/');
         const std::string head = slash == std::string::npos ? std::string() : isoPath.substr(0, slash);
         const std::string tail = slash == std::string::npos ? isoPath : isoPath.substr(slash + 1);
-        if (head == "DATA" || head == "BIN")
-            return tail;
-        if (head == "IRX")
+        if (head == "MODULES")
             return kModulesDir + "/" + tail;
-        return kModulesDir + "/" + (isoPath == "SLUS_214.72" ? "BOOT" : isoPath);
+        if (head == "IOP" || head == "PSS")
+            return isoPath;
+        if (isoPath == "SLUS_212.15")
+            return kModulesDir + "/BOOT";
+        return isoPath;
     };
 
     Iso9660 iso;
@@ -671,7 +669,7 @@ void InstallWizard::draw()
         ImGui::Spacing();
         ImGui::BulletText("1. Point the wizard at your dump (ISO or compressed archive).");
         ImGui::BulletText("2. We verify the disc and extract the data into this folder.");
-        ImGui::BulletText("3. We convert the AFS files into folders, which is how the game reads them.");
+        ImGui::BulletText("3. We copy the game files into this folder so the runtime can load them.");
         ImGui::Spacing();
         if (fe::primaryButton("NEXT", ImVec2(160.0f, 30.0f)))
             goTo(Page::Locate);
@@ -781,7 +779,7 @@ void InstallWizard::draw()
     {
         ImGui::TextColored(fe::okCol(), "%s", doneLabel.c_str());
         ImGui::Spacing();
-        ImGui::BulletText("Disc verified (SLUS_214.72)");
+        ImGui::BulletText("Disc verified (SLUS_212.15)");
         ImGui::BulletText("Data in %s", (m_exeDir / "data").string().c_str());
         if (installed)
             ImGui::Spacing();

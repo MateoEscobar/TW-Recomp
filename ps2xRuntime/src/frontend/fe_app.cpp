@@ -33,11 +33,11 @@
 
 namespace
 {
-    constexpr float DBZ_R = 1.00f, DBZ_G = 0.62f, DBZ_B = 0.10f;
+    constexpr float TW_R = 0.18f, TW_G = 0.52f, TW_B = 0.88f;
     constexpr float GOLD_R = 1.00f, GOLD_G = 0.80f, GOLD_B = 0.30f;
 
     ImVec4 dbz(float r, float g, float b, float a = 1.0f) { return ImVec4(r, g, b, a); }
-    ImVec4 accent(float a = 1.0f) { return dbz(DBZ_R, DBZ_G, DBZ_B, a); }
+    ImVec4 accent(float a = 1.0f) { return dbz(TW_R, TW_G, TW_B, a); }
     ImVec4 gold(float a = 1.0f) { return dbz(GOLD_R, GOLD_G, GOLD_B, a); }
 
     void applyStyle()
@@ -954,9 +954,9 @@ namespace frontend
                         if (pageCtx.requestSaveInstall)
                         {
                             pageCtx.requestSaveInstall = false;
-                            const std::filesystem::path src = exeDir / "saves" / "BSLUS-21472TW" / "BSLUS-21472TW";
-                            const std::filesystem::path dir = exeDir / "savedata" / "BSLUS-21472TW";
-                            const std::filesystem::path dst = dir / "BSLUS-21472TW";
+                            const std::filesystem::path src = exeDir / "saves" / "BSLUS-21215" / "BSLUS-21215";
+                            const std::filesystem::path dir = exeDir / "savedata" / "BSLUS-21215";
+                            const std::filesystem::path dst = dir / "BSLUS-21215";
                             std::error_code ec;
                             std::string msg, col = "ok";
                             if (!std::filesystem::is_regular_file(src, ec))
@@ -970,7 +970,7 @@ namespace frontend
                                 if (std::filesystem::is_regular_file(dst, ec))
                                 {
                                     ec.clear();
-                                    std::filesystem::copy_file(dst, dir / "BSLUS-21472TW.bak",
+                                    std::filesystem::copy_file(dst, dir / "BSLUS-21215.bak",
                                                                std::filesystem::copy_options::overwrite_existing, ec);
                                     if (ec)
                                     {

@@ -8257,9 +8257,9 @@ namespace
     PS2_REGISTER_GAME_OVERRIDE("RECVX sound-driver compat", "slus_201.84", 0u, 0u, &applyRecvxSoundDriverCompat);
     PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
     PS2_REGISTER_GAME_OVERRIDE("LotR sound RPC compat", "SLUS_205.78", 0u, 0u, &applyLotrSoundRpcCompat);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors sound init bypass", "SLUS_214.72", 0u, 0u, &applyBt3SoundInitBypass);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors DTX sound URPC compat", "SLUS_214.72", 0u, 0u, &applyBt3DtxCompat);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors sceMpeg callback stubs", "SLUS_214.72", 0u, 0u, &applyBt3MpegCallbackStubs);
+    PS2_REGISTER_GAME_OVERRIDE("Warriors sound init bypass", "SLUS_212.15", 0u, 0u, &applyBt3SoundInitBypass);
+    PS2_REGISTER_GAME_OVERRIDE("Warriors DTX sound URPC compat", "SLUS_212.15", 0u, 0u, &applyBt3DtxCompat);
+    PS2_REGISTER_GAME_OVERRIDE("Warriors sceMpeg callback stubs", "SLUS_212.15", 0u, 0u, &applyBt3MpegCallbackStubs);
     // [modules] The same five, registered for the install's renamed boot ELF. The matcher keys on the
     // ELF's BASENAME and every Warriors descriptor carries crc32 = 0, so the name is the only criterion --
     // an install that ships the ELF as data/Modules/BOOT would otherwise lose all of them with no
@@ -8344,8 +8344,8 @@ namespace
         if (g_orig113478 && runtime.replaceFunction(0x00113478u, &warriorsNullListGuard113478))
             std::cerr << "[game_overrides] Warriors: NULL list guard on sub_113478 (waits for the loader)" << std::endl;
     }
-    PS2_REGISTER_GAME_OVERRIDE("Warriors NULL packet-list guard", "SLUS_214.72", 0u, 0u, &applyBt3NullPacketGuard);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors CD read-state edge guard", "SLUS_214.72", 0u, 0u, &applyBt3CdStateEdge);
+    PS2_REGISTER_GAME_OVERRIDE("Warriors NULL packet-list guard", "SLUS_212.15", 0u, 0u, &applyBt3NullPacketGuard);
+    PS2_REGISTER_GAME_OVERRIDE("Warriors CD read-state edge guard", "SLUS_212.15", 0u, 0u, &applyBt3CdStateEdge);
     // [modules] ...and for the renamed boot ELF, same reasoning as the three above. These two are the
     // ones whose absence is a real gameplay bug rather than a cosmetic one: the NULL packet-list guard
     // is the infinite-loading freeze, and the CD read-state guard is a load-time edge case.
