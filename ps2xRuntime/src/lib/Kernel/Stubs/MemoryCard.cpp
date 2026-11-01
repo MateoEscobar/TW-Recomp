@@ -968,7 +968,8 @@ namespace ps2_stubs
             }
         }
         // [mcp] Only port 0 is created here. Port 0 is the card the game actually saves to (mcRoot,
-        // which configureIoPathsFromElf points at <deploy>/savedata), and it has to exist before the
+        // which configureIoPathsFromElf resolves to the platform save dir — %APPDATA%\TW-Recomp\saves
+        // on Windows or ~/.local/share/TW-Recomp/saves on Linux — and it has to exist before the
         // guest enumerates, so it is not left to the on-demand path.
         //
         // The other ports are not, and creating them eagerly is what put an empty savedata_slot1

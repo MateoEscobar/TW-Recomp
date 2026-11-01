@@ -2097,6 +2097,27 @@ void PS2Runtime::setIoPaths(const IoPaths &paths)
     runtimeIoPaths() = normalized;
 }
 
+// [TWR-19] Returns the platform-specific Memory Card root:
+//   Windows: %APPDATA%\TW-Recomp\saves
+//   Linux:   $XDG_DATA_HOME/TW-Recomp/saves  (falls back to ~/.local/share/TW-Recomp/saves)
+//   Fallback (env vars missing): savedata/ beside the executable (legacy portable layout)
+static std::filesystem::path getPlatformMcRoot()
+{
+#ifdef _WIN32
+    const char *appData = std::getenv("APPDATA");
+    if (appData && appData[0])
+        return std::filesystem::path(appData) / "TW-Recomp" / "saves";
+#else
+    const char *xdgData = std::getenv("XDG_DATA_HOME");
+    if (xdgData && xdgData[0])
+        return std::filesystem::path(xdgData) / "TW-Recomp" / "saves";
+    const char *home = std::getenv("HOME");
+    if (home && home[0])
+        return std::filesystem::path(home) / ".local" / "share" / "TW-Recomp" / "saves";
+#endif
+    return std::filesystem::path("savedata");
+}
+
 void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
 {
     IoPaths paths = runtimeIoPaths();
@@ -2119,10 +2140,9 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
             (elfDir.filename() == "Modules") ? elfDir.parent_path() : elfDir;
         paths.hostRoot = cdRoot;
         paths.cdRoot = cdRoot;
-        // [deploy] Memory cards live in savedata/ (beside data/), not data/mc0. cdRoot = <deploy>/data,
-        // so its parent is the deploy root where the portable savedata/ folder sits (moved saves:
-        // icon.sys, dbzsm.ico, save).
-        paths.mcRoot = cdRoot.parent_path() / "savedata";
+        // [TWR-19] Platform save dir (see getPlatformMcRoot above). Ignores cdRoot deliberately:
+        // saves belong to the user's profile, not beside the game data.
+        paths.mcRoot = getPlatformMcRoot();
     }
 
     // Allow pointing the CDVD backend at a disc image via environment variable.
@@ -2131,6 +2151,15 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
         if (cdImageEnv[0] != '\0')
         {
             paths.cdImage = std::filesystem::path(cdImageEnv);
+        }
+    }
+
+    // Allow overriding the Memory Card root (e.g. for automated tests or portable installs).
+    if (const char *mcRootEnv = std::getenv("PS2X_MC_ROOT"))
+    {
+        if (mcRootEnv[0] != '\0')
+        {
+            paths.mcRoot = std::filesystem::path(mcRootEnv);
         }
     }
 
