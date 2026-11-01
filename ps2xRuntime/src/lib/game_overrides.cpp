@@ -52,6 +52,7 @@ extern "C" unsigned long long ps2xWinThreadCpuNs();
 #include "runtime/pad_config.h"
 #include "runtime/ps2_memory.h"
 #include "Kernel/Stubs/MemoryCard.h"   // [savestate] getMemoryCardDebugSnapshot (deferred quickload)
+#include "Kernel/Syscalls/Thread.h"    // [TWR-17] ps2_syscalls::WakeupThread (Fix B)
 #include "runtime/ps2x_dueldump.h"
 #include "runtime/ps2_netplay.h"   // [netplay]
 #include "runtime/ps2_seamprobe.h"  // [seamprobe]
@@ -1141,11 +1142,24 @@ extern "C" int ps2xNetServeSwapRead(unsigned long long slotId, unsigned long lon
         const uint32_t tid = getRegU32(ctx, 4); // a0
         if (g_orig26d338) g_orig26d338(rdram, ctx, runtime);
         const uint32_t ret = getRegU32(ctx, 2); // v0
-        static std::atomic<uint32_t> n{0};
-        const uint32_t k = n.fetch_add(1);
-        if (k < 40u || (k % 500u) == 0u)
-            std::fprintf(stderr, "[sndwake] resumeIfSusp(tid=%u) -> %u  %s\n",
-                         tid, ret, (ret == tid && tid != 0) ? "WAKE" : "skip");
+        // Fix B (TWR-17): sub_0026D338 only calls ResumeThread for THS_SUSPEND(8)/THS_WAITSUSPEND(0xC).
+        // After the first resume the sound thread parks via SleepThread → THS_WAIT(4), so every
+        // subsequent kick returns 0. Call WakeupThread directly and restore v0=tid so the caller's
+        // guard (FUN_0026e160: if sub_0026D338(tid)==tid) still passes.
+        if (ret == 0 && tid != 0)
+        {
+            ps2_syscalls::WakeupThread(rdram, ctx, runtime);
+            setReturnU32(ctx, tid);
+        }
+        static const bool s_log = (std::getenv("PS2X_SNDWAKE") != nullptr);
+        if (s_log)
+        {
+            static std::atomic<uint32_t> n{0};
+            const uint32_t k = n.fetch_add(1);
+            if (k < 40u || (k % 500u) == 0u)
+                std::fprintf(stderr, "[sndwake] resumeIfSusp(tid=%u) -> %u  %s\n",
+                             tid, ret, (ret == tid && tid != 0) ? "WAKE" : "skip");
+        }
     }
     PS2Runtime::RecompiledFunction g_orig26e160 = nullptr;
     void warriorsSndKickProbe(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // FUN_0026e160
@@ -1165,12 +1179,19 @@ extern "C" int ps2xNetServeSwapRead(unsigned long long slotId, unsigned long lon
     //                 `bnel cnt,0` at 0x26e464 -- with cnt!=0 the whole block is skipped.
     // cnt sticks at 1 forever: one enqueue, no matching completion. Count each stage so we
     // can see which half runs.
+    inline uint32_t sndRd32(uint8_t *rdram, uint32_t addr); // defined below; forward-declared for warriorsSndSvc Fix A
     std::atomic<uint32_t> g_sndSvc{0}, g_sndEnq{0}, g_sndDec{0};
     PS2Runtime::RecompiledFunction g_orig26e290 = nullptr, g_orig26d810 = nullptr, g_orig26d9f0 = nullptr;
+    PS2Runtime::RecompiledFunction g_fixSndDec = nullptr; // [TWR-17] Fix A: sub_0026D9F0, always set for synthetic completion
     void warriorsSndSvc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // sub_0026E290
     {
         g_sndSvc.fetch_add(1);
         if (g_orig26e290) g_orig26e290(rdram, ctx, runtime);
+        // Fix A (TWR-17): inject a synthetic IOP completion to unblock the refcount at 0x2C9F14.
+        // With no real IOP the callback (sub_0026D9F0) is never called → cnt sticks at 1 →
+        // the completion block gated by `bnel cnt,0` at 0x26e464 never runs.
+        if (const uint32_t cnt = sndRd32(rdram, 0x002C9F14u); cnt > 0u && g_fixSndDec)
+            g_fixSndDec(rdram, ctx, runtime);
     }
     void warriorsSndEnq(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // FUN_0026d810
     {
@@ -8052,24 +8073,32 @@ namespace
             std::fprintf(stderr, "[sndnostop] stream STOP suppression %s\n",
                          g_orig28b438 ? "ARMED" : "FAILED (0x28b438 not registered)");
         }
-        // [sndcnt] sound-ready refcount stage counters.
+        // [TWR-17] Fix A + Fix B: always-on DTX audio intercepts.
+        // Fix A: look up sub_0026D9F0 for synthetic IOP-completion injection in warriorsSndSvc.
+        g_fixSndDec = runtime.lookupFunction(0x0026d9f0u);
+        // Fix A: intercept the sound service routine to inject the missing completion.
+        g_orig26e290 = runtime.lookupFunction(0x0026e290u);
+        if (g_orig26e290) runtime.replaceFunction(0x0026e290u, &warriorsSndSvc);
+        // Fix B: intercept the wake guard to handle THS_WAIT(4) via WakeupThread.
+        g_orig26d338 = runtime.lookupFunction(0x0026d338u);
+        if (g_orig26d338) runtime.replaceFunction(0x0026d338u, &warriorsSndResumeIfSusp);
+        std::fprintf(stderr, "[twr17] Fix A svc=%d dec=%d  Fix B wake=%d\n",
+                     g_orig26e290 != nullptr, g_fixSndDec != nullptr, g_orig26d338 != nullptr);
+        // [sndcnt] sound-ready refcount stage counters (diagnostic, PS2X_SNDCNT only).
         if (std::getenv("PS2X_SNDCNT"))
         {
-            g_orig26e290 = runtime.lookupFunction(0x0026e290u);
-            if (g_orig26e290) runtime.replaceFunction(0x0026e290u, &warriorsSndSvc);
+            // warriorsSndSvc already armed above (Fix A); add the enqueue/dec diagnostic probes.
             g_orig26d810 = runtime.lookupFunction(0x0026d810u);
             if (g_orig26d810) runtime.replaceFunction(0x0026d810u, &warriorsSndEnq);
             g_orig26d9f0 = runtime.lookupFunction(0x0026d9f0u);
             if (g_orig26d9f0) runtime.replaceFunction(0x0026d9f0u, &warriorsSndDec);
-            std::fprintf(stderr, "[sndcnt] hooks svc=%d enq=%d dec=%d\n",
-                         g_orig26e290 != nullptr, g_orig26d810 != nullptr, g_orig26d9f0 != nullptr);
+            std::fprintf(stderr, "[sndcnt] hooks enq=%d dec=%d\n",
+                         g_orig26d810 != nullptr, g_orig26d9f0 != nullptr);
         }
-        // [sndwake] sound-thread wake-guard probe.
+        // [sndwake] sound-thread wake-guard probe (diagnostic, PS2X_SNDWAKE only).
         if (std::getenv("PS2X_SNDWAKE"))
         {
-            g_orig26d338 = runtime.lookupFunction(0x0026d338u);
-            if (g_orig26d338) runtime.replaceFunction(0x0026d338u, &warriorsSndResumeIfSusp);
-            else std::cerr << "[sndwake] 0x26d338 not registered" << std::endl;
+            // warriorsSndResumeIfSusp already armed above (Fix B); add the kicker probe.
             g_orig26e160 = runtime.lookupFunction(0x0026e160u);
             if (g_orig26e160) runtime.replaceFunction(0x0026e160u, &warriorsSndKickProbe);
             else std::cerr << "[sndwake] 0x26e160 not registered" << std::endl;
