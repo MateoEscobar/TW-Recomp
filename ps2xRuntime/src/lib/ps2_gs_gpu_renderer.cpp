@@ -1953,12 +1953,12 @@ uint64_t GsGpuRenderer::resolveTextureVersion(uint64_t baseKey, uint32_t pageLo,
             const TexVersion &v = vit->second;
             bool dirtyF = false;
             for (uint32_t p = pageLo; p <= pageHi; ++p)
-                if (__atomic_load_n(&m_contentSeq[p], __ATOMIC_ACQUIRE) > v.seqChecked) { dirtyF = true; break; }
+                if (std::atomic_ref<uint32_t>(m_contentSeq[p]).load(std::memory_order_acquire) > v.seqChecked) { dirtyF = true; break; }
             extern bool g_resolveAlphaData;
             const bool fboD = (s_fboDirtyMode0 == 1) || (s_fboDirtyMode0 == 2 && g_resolveAlphaData);
             if (!dirtyF && fboD)
                 for (uint32_t p = pageLo; p <= pageHi; ++p)
-                    if (__atomic_load_n(&m_pageDrawSeq[p], __ATOMIC_ACQUIRE) > v.drawChecked) { dirtyF = true; break; }
+                    if (std::atomic_ref<uint64_t>(m_pageDrawSeq[p]).load(std::memory_order_acquire) > v.drawChecked) { dirtyF = true; break; }
             if (!dirtyF)
             {
                 const uint32_t ep = m_texCacheEpoch.load(std::memory_order_acquire);
@@ -4997,7 +4997,7 @@ void GsGpuRenderer::putTexture(uint64_t key, std::vector<uint8_t> rgba, int w, i
     ct.texScale = texScale;
     ct.alphaScale = alphaScale;   // [texreplace]
     ct.decodeSeq = (seqAt >= 0) ? (uint32_t)seqAt : m_writeSeq;   // [decpool]
-    ct.putGen = __atomic_load_n(&g_publishGen, __ATOMIC_RELAXED) + 1u;   // [texclobber] the frame being built (swapFrame publishes it as g_publishGen+1)
+    ct.putGen = std::atomic_ref<uint32_t>(g_publishGen).load(std::memory_order_relaxed) + 1u;   // [texclobber] the frame being built (swapFrame publishes it as g_publishGen+1)
     ++g_texClob.puts;
     ct.needsUpload = true;
     m_upQueue.push_back(key);   // [upqueue] O(1) here instead of an O(cache) scan per chunk render

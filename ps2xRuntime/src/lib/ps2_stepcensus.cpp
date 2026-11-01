@@ -8,6 +8,9 @@
 // loads; expect the guest to run several times slower while it is on.
 #include "ps2_runtime.h"
 #include <atomic>
+#include <immintrin.h>
+// GCC allows __m128i[i] as a vector subscript; MSVC does not — use _mm_cvtsi128_si32 (low 32 bits).
+namespace { inline uint32_t r32(const __m128i &v) { return (uint32_t)_mm_cvtsi128_si32(v); } }
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -171,7 +174,7 @@ void ps2StepCensusStore(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint6
             // a store counts when its pc OR its caller ($ra) lies in a range: the game's vector library
             // (0x120000..0x122400) does most of a module's persistent stores on its behalf. Loops are capped at
             // 8 lines per pc per frame so matrix math cannot eat the budget (1100 stores/frame from one pc seen).
-            const uint32_t ra = (uint32_t)ctx->r[31][0];
+            const uint32_t ra = r32(ctx->r[31]);
             static uint32_t s_capFrame = 0; static std::unordered_map<uint32_t, uint32_t> s_perPc;
             if (fr != s_capFrame) { s_capFrame = fr; s_perPc.clear(); }
             if (fr - s_trigFrame < g_stFrames)
@@ -184,7 +187,7 @@ void ps2StepCensusStore(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint6
                         {
                             uint32_t ov = 0; std::memcpy(&ov, rdram + a, size < 4 ? size : 4); float fo, fn; const uint32_t nv = (uint32_t)valueLo;
                             std::memcpy(&fo, &ov, 4); std::memcpy(&fn, &nv, 4);
-                            std::fprintf(stderr, "[storetrace] f=%u pc=0x%06x ra=0x%06x a=0x%x sz=%u old=0x%x(%g) new=0x%x(%g) a0=0x%x a1=0x%x a2=0x%x\n", fr, ctx->pc, (uint32_t)ctx->r[31][0], a, size, ov, fo, nv, fn, (uint32_t)ctx->r[4][0], (uint32_t)ctx->r[5][0], (uint32_t)ctx->r[6][0]);
+                            std::fprintf(stderr, "[storetrace] f=%u pc=0x%06x ra=0x%06x a=0x%x sz=%u old=0x%x(%g) new=0x%x(%g) a0=0x%x a1=0x%x a2=0x%x\n", fr, ctx->pc, r32(ctx->r[31]), a, size, ov, fo, nv, fn, r32(ctx->r[4]), r32(ctx->r[5]), r32(ctx->r[6]));
                         }
                         break;
                     }
@@ -198,10 +201,10 @@ void ps2StepCensusStore(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint6
             if (size == 16) nv = off < 8 ? (uint32_t)(valueLo >> (8 * off)) : (uint32_t)(valueHi >> (8 * (off - 8)));
             else nv = (uint32_t)(valueLo >> (8 * off));
             float fo, fn; std::memcpy(&fo, &oldv, 4); std::memcpy(&fn, &nv, 4);
-            const uint32_t a0 = (uint32_t)ctx->r[4][0], a1 = (uint32_t)ctx->r[5][0], a2 = (uint32_t)ctx->r[6][0];
+            const uint32_t a0 = r32(ctx->r[4]), a1 = r32(ctx->r[5]), a2 = r32(ctx->r[6]);
             const bool changing = oldv != nv;   // (a float tolerance here hid integer slots whose bits are float denormals: the ki 98400 -> 96800)
             if (changing && s_n[k]++ < 500u)
-                std::fprintf(stderr, "[addrwatch%d] slot=0x%x pc=0x%06x ra=0x%06x size=%u old=%g new=%g a0=0x%x a1=0x%x a2=0x%x frame=%llu\n", k, w, ctx->pc, (uint32_t)ctx->r[31][0], size, fo, fn, a0, a1, a2, (unsigned long long)g_warriorsFrameCount.load());
+                std::fprintf(stderr, "[addrwatch%d] slot=0x%x pc=0x%06x ra=0x%06x size=%u old=%g new=%g a0=0x%x a1=0x%x a2=0x%x frame=%llu\n", k, w, ctx->pc, r32(ctx->r[31]), size, fo, fn, a0, a1, a2, (unsigned long long)g_warriorsFrameCount.load());
             if (size == 16 && ctx->pc >= 0x120000u && ctx->pc < 0x122400u && (a0 & 0x1FFFFFFFu) == a && s_cnt < 6 && k < g_addrWatchCnt)
             {   // follow $a1 (the source) of a vector helper, one level below the requested slots only
                 const uint32_t srcs[1] = { ((a1 & 0x1FFFFFFFu) + off) & 0x1FFFFFFFu };
@@ -209,7 +212,7 @@ void ps2StepCensusStore(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint6
                 {
                     if (src < 0x100000u || src >= 32u * 1024u * 1024u) continue;
                     bool have = false; for (int m = 0; m < s_cnt; ++m) if (s_w[m] == src) have = true;
-                    if (!have && s_cnt < 6) { s_w[s_cnt++] = src; std::fprintf(stderr, "[addrwatch] helper 0x%06x (from 0x%06x): also watching source slot 0x%x (level %d)\n", ctx->pc, (uint32_t)ctx->r[31][0], src, s_cnt - 1); }
+                    if (!have && s_cnt < 6) { s_w[s_cnt++] = src; std::fprintf(stderr, "[addrwatch] helper 0x%06x (from 0x%06x): also watching source slot 0x%x (level %d)\n", ctx->pc, r32(ctx->r[31]), src, s_cnt - 1); }
                 }
             }
         }
@@ -223,7 +226,7 @@ void ps2StepCensusStore(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint6
         if (pc < kBase || pc >= kEnd) return;
         const uint32_t a = guestAddr & 0x1FFFFFFFu;
         if (a + 16u > 32u * 1024u * 1024u) return;
-        const uint32_t ra = (uint32_t)ctx->r[31][0];
+        const uint32_t ra = r32(ctx->r[31]);
         Site &s = g_vecSites[((uint64_t)pc << 32) | ra];
         uint32_t oldv[4]; std::memcpy(oldv, rdram + a, 16);
         const uint32_t nw[4] = { (uint32_t)valueLo, (uint32_t)(valueLo >> 32), (uint32_t)valueHi, (uint32_t)(valueHi >> 32) };
@@ -589,7 +592,7 @@ void ps2HalfStepWrite128(uint8_t *rdram, uint32_t guestAddr, uint64_t &lo, uint6
     if (!g_hs || !ctx || ctx != g_hsCtx.load(std::memory_order_relaxed)) return;
     const uint32_t pc = ctx->pc;
     if (pc < kBase || pc >= kEnd) return;
-    if (g_hsVec.find(((uint64_t)pc << 32) | (uint32_t)ctx->r[31][0]) == g_hsVec.end()) return;   // keyed by (site, caller)
+    if (g_hsVec.find(((uint64_t)pc << 32) | r32(ctx->r[31])) == g_hsVec.end()) return;   // keyed by (site, caller)
     const uint32_t a = guestAddr & 0x1FFFFFFFu;
     if (a + 16u > 32u * 1024u * 1024u) return;
     const uint32_t frame = (uint32_t)g_warriorsFrameCount.load(std::memory_order_relaxed);
