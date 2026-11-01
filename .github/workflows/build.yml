@@ -60,13 +60,33 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Upload release artifacts
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Package Windows release
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $staging = "dist\TW-Recomp"
+          cmake --install build --prefix $staging
+          # Rename executable to the user-facing name
+          Move-Item -Force "$staging\bin\ps2EntryRunner.exe" "$staging\bin\TW-Recomp.exe"
+          Copy-Item "games\warriors\config.ini.template" "$staging\bin\"
+          Copy-Item "README.md" "$staging\bin\"
+          $zip = "TW-Recomp-${{ github.ref_name }}-windows.zip"
+          Compress-Archive -Path "$staging\bin\*" -DestinationPath $zip -Force
+          Write-Host "==> $zip"
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
-          name: TW-Recomp-${{ runner.os }}-${{ github.ref_name }}
+          name: TW-Recomp-windows-${{ github.ref_name }}
+          path: TW-Recomp-${{ github.ref_name }}-windows.zip
+
+      - name: Upload Linux artifact
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: TW-Recomp-Linux-${{ github.ref_name }}
           path: |
-            build/ps2xRuntime/ps2EntryRunner*
-            build/ps2xRuntime/*.dll
-            build/ps2xRecomp/ps2xRecomp/ps2_recomp*
-            build/ps2xAnalyzer/ps2_analyzer*
+            build/ps2xRuntime/ps2EntryRunner
+            build/ps2xRecomp/ps2xRecomp/ps2_recomp
+            build/ps2xAnalyzer/ps2_analyzer
