@@ -381,6 +381,28 @@ namespace ps2_stubs
         ps2_syscalls::SifCheckStatRpc(rdram, ctx, runtime);
     }
 
+    // [TWR-27] Statically linked SIF RPC wait/dispatch loop (0x154AE0).
+    // The EE-side polling loop polls hdr.sema_id waiting for IOP hardware ACK that
+    // never arrives in a PC recompilation. Return $a0 (client data pointer) immediately
+    // so callers that capture $v0 still get a valid pointer.
+    void sub_00154AE0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnU32(ctx, getRegU32(ctx, 4));
+    }
+
+    // [TWR-27] Statically linked SIF RPC call dispatch (0x154D50).
+    // Equivalent to the inner body of sceSifCallRpc in the static SIF library.
+    // Returns 0 (success) immediately — IOP responses are not available on PC.
+    void sub_00154D50(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        (void)ctx;
+        setReturnS32(ctx, 0);
+    }
+
     void sceSifDmaStat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
