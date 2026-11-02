@@ -786,17 +786,6 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[boot] start -> ELF loaded: %.1f ms\n",
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_boot).count());
 
-        // [r3000] Optional: run a recompiled IOP module natively (diagnostic).
-        // PS2X_IOP_RUN=SIO2MAN.IRX  PS2X_IOP_DIR=<deploy>/data/IRX/
-        if (const char *iopRun = std::getenv("PS2X_IOP_RUN"); iopRun && iopRun[0])
-        {
-            std::string name = iopRun;
-            if (name.find('.') == std::string::npos) name += ".IRX";
-            const std::filesystem::path path = PS2Runtime::resolveIopModulePath(name);
-            runtime.loadAndRunIopModule(path.string().c_str());
-            return 0;
-        }
-
         runtime.run();
 
 #ifdef _DEBUG
