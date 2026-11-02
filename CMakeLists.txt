@@ -57,6 +57,10 @@ if(TW_BUILD_RECOMP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ps2xRecomp/ps2xRecomp
 endif()
 
 if(TW_BUILD_RUNTIME AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ps2xRuntime/CMakeLists.txt")
+    # [TWR-29] Emulated IOP (R3000A interpreter + virtual IOP kernel) from the PS2Recomp
+    # submodule. It is the port's only IOP: the game's IRX modules run on it. Exposed as the
+    # ps2x::iop target that ps2_runtime links. Its tests build standalone (see docs/iop.md).
+    add_subdirectory("ps2xRecomp/ps2xIOP")
     add_subdirectory("ps2xRuntime")
 endif()
 

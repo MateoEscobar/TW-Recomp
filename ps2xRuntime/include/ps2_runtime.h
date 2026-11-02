@@ -33,6 +33,14 @@
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_audio.h"
 #include "runtime/ps2_pad.h"
+#include "ps2x/iop/iop_types.h"   // [TWR-29] emulated IOP (ps2xIOP) value types
+
+namespace ps2x::iop
+{
+    class IopSubsystem;
+}
+class PS2IopHostAdapter;
+class PS2IopTransport;
 
 enum PS2Exception
 {
@@ -548,6 +556,34 @@ public:
     static void setIoPaths(const IoPaths &paths);
     static void configureIoPathsFromElf(const std::string &elfPath);
 
+    // [TWR-29] Emulated IOP (ps2xIOP). PS2Runtime owns the subsystem and its host adapter;
+    // the SIF stubs/syscalls reach it only through PS2IopTransport. Every wrapper takes
+    // m_iopMutex (recursive): the subsystem is not thread-safe and is driven by guest
+    // threads (RPC/DMA under the guest lock), the vblank worker (pump) and the GL thread
+    // (debug snapshot). Recursive because handleRpc -> IRX -> sceSifSendCmd -> EE handler
+    // -> SifCallRpc -> handleIopRpc is a legitimate re-entry on the same thread.
+    [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
+    [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
+    [[nodiscard]] bool stopIopModule(int32_t moduleId, int32_t *result = nullptr);
+    [[nodiscard]] ps2x::iop::DebugSnapshot iopDebugSnapshot() const;
+    uint32_t allocateIopMemory(uint32_t size, uint32_t alignment = 16u);
+    bool freeIopMemory(uint32_t address);
+    bool readIopMemory(uint32_t address, void *destination, size_t size) const;
+    bool writeIopMemory(uint32_t address, const void *source, size_t size);
+    bool zeroIopMemory(uint32_t address, size_t size);
+    bool isIopMemoryRange(uint32_t address, size_t size) const;
+    [[nodiscard]] ps2x::iop::RpcAbi selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const;
+    [[nodiscard]] bool canBindIopRpc(uint32_t sid) const noexcept;
+    [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
+    void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
+    // Advance the IOP by `eeCycles` EE cycles (threads, timers, cdvd). Called from the EE
+    // checkpoints (eeCheckpointDue) and, as a debt catch-up, from the vblank worker so the
+    // IOP keeps running when every EE thread sleeps waiting for it.
+    void advanceIopEeCycles(uint64_t eeCycles) noexcept;
+    void pumpIopForVsync() noexcept;
+    void resetIop();
+    [[nodiscard]] PS2IopHostAdapter &iopHost() { return *m_iopHost; }
+
     void SignalException(R5900Context *ctx, PS2Exception exception);
 
     void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
@@ -763,6 +799,7 @@ private:
 
     friend class GuestExecutionScope;
     friend class GuestExecutionReleaseScope;
+    friend class PS2IopTransport;
 
 private:
     PS2Memory m_memory;
@@ -798,6 +835,14 @@ private:
     DebugUiCallback m_debugUiShutdownCallback = nullptr;
     void *m_debugUiUserData = nullptr;
     bool m_debugUiInitialized = false;
+
+    // [TWR-29] Emulated IOP. Declared after m_memory so both die before the guest RAM; the
+    // adapter is declared before the subsystem so the subsystem (which holds a reference to
+    // it) is destroyed first.
+    std::unique_ptr<PS2IopHostAdapter> m_iopHost;
+    std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
+    mutable std::recursive_mutex m_iopMutex;
+    std::atomic<uint64_t> m_iopCyclesSinceVsync{0u};
 
 public:
     std::atomic<uint32_t> m_debugPc{0};

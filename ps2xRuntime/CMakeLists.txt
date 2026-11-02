@@ -733,6 +733,8 @@ src/lib/ui_sdl.cpp          # [C] ImGui platform glue on SDL2 (replaces rlImGui)
     src/lib/ps2x_perf.cpp        # [perf] present rate, frame-time percentiles, GPU busy + its source
     src/lib/ps2x_memstat.cpp     # [memstat] resident size for the [fps] line
     src/lib/ps2_iop.cpp
+    src/lib/ps2_iop_host.cpp     # [TWR-29] ps2x::iop::IopHost adapter (emulated IOP <-> EE runtime)
+    src/lib/ps2_iso9660.cpp      # [TWR-29] ISO9660 path -> (LBA, size) resolver shared by the IOP host
     src/lib/ps2_iop_audio.cpp
     src/lib/ps2_iop_dbcman.cpp
     src/lib/ps2_iop_sdrdrv.cpp
@@ -747,6 +749,10 @@ src/lib/ui_sdl.cpp          # [C] ImGui platform glue on SDL2 (replaces rlImGui)
     src/lib/ps2_vu1_native.cpp   # [vunative] hand-written kernels for the hot VU1 microprograms
     src/lib/games_database.cpp
 )
+
+# [TWR-29] The emulated IOP. PUBLIC: ps2_runtime.h includes ps2x/iop/iop_types.h, so every
+# consumer of the header (the runner, the panel) needs the include directory too.
+target_link_libraries(ps2_runtime PUBLIC ps2x::iop)
 
 # Native Linux evdev reader for unmapped gamepads (xone driver).
 if(UNIX AND NOT APPLE)

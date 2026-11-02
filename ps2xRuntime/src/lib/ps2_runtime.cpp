@@ -25,6 +25,8 @@ extern "C" int ps2xSchedTraceOn();               // PS2X_SCHEDTRACE window (defi
 #include "runtime/ps2_texreplace.h"   // [texreplace]
 #include "runtime/ps2_coverage.h"     // [coverage]
 #include "runtime/ps2_iop_module.h"   // [r3000] IRX loader
+#include "ps2_iop_host.h"              // [TWR-29] ps2xIOP host adapter
+#include "ps2x/iop/iop_subsystem.h"    // [TWR-29] emulated IOP
 #include "runtime/ps2_toml.h"         // settings.toml
 #include "runtime/ps2_video_status.h"   // [video] the Video-tab status the overlay polls
 #include "runtime/ps2x_perf_status.h"   // [perf] the fps / frame-time / GPU-busy readout
@@ -1301,6 +1303,10 @@ static void UploadFrame(warriorsTexture2D &tex, PS2Runtime *rt, uint32_t &outWid
 
 PS2Runtime::PS2Runtime()
 {
+    // [TWR-29] The emulated IOP exists for the whole runtime lifetime; it is reset (modules
+    // unloaded, kernel re-seeded) in initialize() once the I/O paths are known.
+    m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
+    m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
     {
         const char *v = std::getenv("PS2X_SCHED");
         m_schedEnabled = (v && v[0] && v[0] != '0');
@@ -1492,6 +1498,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                                 m_gs, &m_memory, top, itop, 65536); });
     m_iop.init(rdram);
     m_iop.reset();
+    resetIop();   // [TWR-29]
     m_vu0.reset();
     m_vu1.reset();
 
@@ -9703,4 +9710,144 @@ namespace ps2x   // [video] at global scope: the overlay calls ps2x::GetVideoSta
         return s;
     }
 
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// [TWR-29] Emulated IOP (ps2xIOP) wrappers. See the declaration block in ps2_runtime.h for the
+// locking rules; PS2IopTransport is the only caller outside PS2Runtime itself.
+// ---------------------------------------------------------------------------------------------
+
+ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModule(std::string_view path, const void *arguments, uint32_t argumentSize)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    return m_iopSubsystem->loadModule(path, arguments, argumentSize);
+}
+
+ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    return m_iopSubsystem->loadModuleBuffer(guestAddress, arguments, argumentSize);
+}
+
+bool PS2Runtime::stopIopModule(int32_t moduleId, int32_t *result)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    return m_iopSubsystem->stopModule(moduleId, result);
+}
+
+ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem->selectRpcAbi(request);
+}
+
+bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem->canBindRpc(sid);
+}
+
+ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(ctx, rdram);
+    request.callToken = scope.token();
+    return m_iopSubsystem->handleRpc(request);
+}
+
+void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(nullptr, rdram);
+    m_iopSubsystem->onSifTransfer(transfer);
+}
+
+void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+{
+    if (eeCycles == 0u)
+    {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    m_iopSubsystem->runEeCycles(eeCycles);
+}
+
+void PS2Runtime::pumpIopForVsync() noexcept
+{
+    // NTSC EE clock / 60 Hz. Whatever the checkpoints already pumped this field is not
+    // pumped again: the debt is only the remainder. SYSTEM.CNF of SLUS_212.15 is NTSC.
+    constexpr uint64_t kEeCyclesPerVsync = 294912000ull / 60ull;
+    const uint64_t pumped = m_iopCyclesSinceVsync.exchange(0u, std::memory_order_acq_rel);
+    if (pumped >= kEeCyclesPerVsync)
+    {
+        return;
+    }
+    const uint64_t debt = kEeCyclesPerVsync - pumped;
+
+    // The vblank worker runs outside the guest execution lock. An IRX woken by this pump may
+    // call back into the EE (sceSifSendCmd -> dispatchSifCommand -> recompiled handler),
+    // which needs that lock, while a guest thread blocked on m_iopMutex may already hold it:
+    // that is a lock-order inversion. So the pump only runs when it can take the guest lock
+    // without waiting; otherwise some EE thread is running and its checkpoints keep pumping.
+    std::unique_lock<std::recursive_mutex> guestLock(m_guestExecutionMutex, std::try_to_lock);
+    if (!guestLock.owns_lock())
+    {
+        return;
+    }
+    advanceIopEeCycles(debt);
+}
+
+void PS2Runtime::resetIop()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    m_iopSubsystem->reset();
+    m_iopCyclesSinceVsync.store(0u, std::memory_order_relaxed);
+}
+
+ps2x::iop::DebugSnapshot PS2Runtime::iopDebugSnapshot() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem->debugSnapshot();
+}
+
+uint32_t PS2Runtime::allocateIopMemory(uint32_t size, uint32_t alignment)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem ? m_iopSubsystem->allocateMemory(size, alignment) : 0u;
+}
+
+bool PS2Runtime::freeIopMemory(uint32_t address)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem && m_iopSubsystem->freeMemory(address);
+}
+
+bool PS2Runtime::readIopMemory(uint32_t address, void *destination, size_t size) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem && m_iopSubsystem->readMemory(address, destination, size);
+}
+
+bool PS2Runtime::writeIopMemory(uint32_t address, const void *source, size_t size)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem && m_iopSubsystem->writeMemory(address, source, size);
+}
+
+bool PS2Runtime::zeroIopMemory(uint32_t address, size_t size)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem && m_iopSubsystem->zeroMemory(address, size);
+}
+
+bool PS2Runtime::isIopMemoryRange(uint32_t address, size_t size) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    return m_iopSubsystem && m_iopSubsystem->isMemoryRange(address, size);
 }
