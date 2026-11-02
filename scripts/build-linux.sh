@@ -10,10 +10,11 @@
 #   - patchelf (solo para --package)
 #
 # Uso:
-#   scripts/build-linux.sh                          # solo compilar (Release)
-#   scripts/build-linux.sh --config Debug           # compilar en Debug
-#   scripts/build-linux.sh --package                # compilar + empaquetar tar.gz en dist/
-#   scripts/build-linux.sh --package --output ~/rel # idem, directorio personalizado
+#   scripts/build-linux.sh                                         # solo compilar (Release)
+#   scripts/build-linux.sh --config Debug                          # compilar en Debug
+#   scripts/build-linux.sh --package                               # compilar + empaquetar tar.gz en dist/
+#   scripts/build-linux.sh --package --output ~/rel                # idem, directorio personalizado
+#   scripts/build-linux.sh --package --skip-build --output <dir>   # solo empaquetar (build ya hecho)
 
 set -euo pipefail
 
