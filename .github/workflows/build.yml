@@ -36,7 +36,8 @@ jobs:
             libswscale-dev \
             pkg-config \
             xorg-dev \
-            libasound2-dev
+            libasound2-dev \
+            patchelf
 
       - name: Set up MSVC x64 environment (Windows)
         if: runner.os == 'Windows'
@@ -81,12 +82,14 @@ jobs:
           name: TW-Recomp-windows-${{ github.ref_name }}
           path: TW-Recomp-${{ github.ref_name }}-windows.zip
 
+      - name: Package Linux release
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          bash scripts/build-linux.sh --package --skip-build --output dist
+
       - name: Upload Linux artifact
         if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
-          name: TW-Recomp-Linux-${{ github.ref_name }}
-          path: |
-            build/ps2xRuntime/ps2EntryRunner
-            build/ps2xRecomp/ps2xRecomp/ps2_recomp
-            build/ps2xAnalyzer/ps2_analyzer
+          name: TW-Recomp-linux-${{ github.ref_name }}
+          path: dist/TW-Recomp-${{ github.ref_name }}-linux-x64.tar.gz
