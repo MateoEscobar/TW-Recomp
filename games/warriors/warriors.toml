@@ -47,6 +47,11 @@ stubs = [
   "sceSifSendCmd@0x0043FE98",
   "_sceSifCmdIntrHdlr@0x0043FF18",
   "sceSifWriteBackDCache@0x00440060",
+  # [TWR-27] Statically linked SIF RPC polling loop and call dispatch.
+  # The EE-side static library polls sema_id waiting for IOP ACK that never arrives on PC.
+  # These stubs mirror what BT3-Recomp does for its equivalent 0x002Bxxxx addresses.
+  "sub_00154AE0@0x00154AE0",
+  "sub_00154D50@0x00154D50",
   "sceSifInitRpc@0x00440110",
   "_sceRpcGetFPacket@0x004403A0",
   "_sceRpcGetFPacket2@0x004403D0",
