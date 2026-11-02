@@ -3,6 +3,7 @@
 extern "C" bool ps2xAudioFeedOn();   // [rollback] ps2_runtime.cpp: false while re-simulating / fast-forwarding
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
+#include "../Syscalls/Thread.h"
 
 #include <map>
 
@@ -664,7 +665,14 @@ namespace ps2_stubs
 
     void sceSifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, 0);
+        // [TWR-27] On real PS2 hardware, sceSifRpcLoop never returns — it is an infinite
+        // loop that blocks the calling thread forever waiting for IOP RPC messages.
+        // With the IOP stubbed, no messages ever arrive, but we must NOT return: if this
+        // thread's fiber falls off the end the runtime treats every guest thread as done
+        // and terminates the process with "PS2 Thread Exit".
+        // Call SleepThread (syscall 64/0x60) to park this fiber in WAIT state permanently.
+        // The main game thread (tid=1) continues unaffected via the scheduler.
+        ps2_syscalls::SleepThread(rdram, ctx, runtime);
     }
 
     void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

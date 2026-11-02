@@ -54,4 +54,7 @@ namespace ps2_stubs
     void sceSifStopDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSyncIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifWriteBackDCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    // [TWR-27] Statically-linked SIF functions bypassed at runtime
+    void sub_00154AE0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sub_00154D50(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }

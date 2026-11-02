@@ -685,7 +685,10 @@
     X(sceVu0UnitMatrix)                       \
     X(sceVu0ViewScreenMatrix)                 \
     X(sceWrite)                               \
-    /* Game/middleware */
+    /* Game/middleware */                     \
+    /* TWR-27: statically-linked SIF stubs */ \
+    X(sub_00154AE0)                           \
+    X(sub_00154D50)
 
 // Test hooks: override pad input for scePadRead.
 #define PS2_TEST_HOOK_LIST(X)                                         \

@@ -589,5 +589,4 @@ label_33b124:
     // 0x33b124: 0x0  nop
     ctx->pc = 0x33b124u;
     // NOP
-    ctx->pc = 0x33b128u;
 }

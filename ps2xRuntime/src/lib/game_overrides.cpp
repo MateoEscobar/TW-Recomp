@@ -8364,10 +8364,135 @@ namespace
     // sub_00339A20 to ret0 lets the MSS initialisation path fail gracefully and
     // the boot sequence continues.  Full MSS/audio support is tracked in TWR-17.
 
+    // [TWR-27] sub_00187D28 is the game's main task scheduler. The caller in
+    // sub_00182C38 passes a0 = *(0x50CD4C), which is the scheduler-context object.
+    // That object is initialised by sub_00184918 via a vtable call; because the
+    // vtable is only populated after IOP module loads that are currently stubbed,
+    // the pointer is 0x0 at the first scheduler call. With a0=0 the scheduler does
+    // s2=0, then reads *(s2+4)=*(0x4) = 0x8 from the PS2 BIOS vector table,
+    // enters a sorted-insert loop at 0x187DC8 that never terminates, causing the
+    // gframe=0 hang.
+    //
+    // Fix: gate the scheduler on a non-null context. When a0=0 return immediately
+    // (ret0). Once sub_00184918 has run and *(0x50CD4C) != 0, the scheduler runs
+    // normally.
+    // [TWR-27 run11] sub_0033B128 (MSS vtable initialiser) is unreachable because
+    // sub_0033AFE0 has a cross-function fall-through bug in the recompiler.
+    // sub_0033B128 would write MEM[0x6EB958]=0x5444E0 (vtable ptr for the MSS
+    // control struct). Without it:
+    //   - JALR at 0x1447BC in sub_001446D0 dereferences MEM[0]+0xC4=garbage → early return
+    //   - sub_001446D0 never reaches the 3× JAL func_42A938 → no gameplay threads
+    // Fix: hook sub_0033AFC8 (which reliably runs first and writes MEM[0x5127E4]=0x6EB958)
+    // to also write the vtable pointer. That happens well before sub_001446D0 runs.
+    PS2Runtime::RecompiledFunction g_orig33AFC8 = nullptr;
+    void warriorsMSSVtableInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Let sub_0033AFC8 run first so it sets up MEM[0x5127E4]=0x6EB958.
+        if (g_orig33AFC8) g_orig33AFC8(rdram, ctx, runtime);
+
+        static bool s_done = false;
+        if (!s_done) {
+            s_done = true;
+            // Replicate what sub_0033B128 would write when called by sub_0033B168:
+            //   sw vtable,  0x0($struct)  → MEM[0x6EB958] = 0x5444E0  (MSS vtable)
+            //   sw -1,     0x18($struct)  → MEM[0x6EB970] = 0xFFFFFFFF
+            //   sw $0,      0x4($struct)  → MEM[0x6EB95C] = 0
+            //   sw $0,      0x8($struct)  → MEM[0x6EB960] = 0
+            //   sw $0,      0xC($struct)  → MEM[0x6EB964] = 0
+            Ps2FastWrite32(rdram, 0x6EB958u, 0x5444E0u);
+            Ps2FastWrite32(rdram, 0x6EB970u, 0xFFFFFFFFu);
+            Ps2FastWrite32(rdram, 0x6EB95Cu, 0u);
+            Ps2FastWrite32(rdram, 0x6EB960u, 0u);
+            Ps2FastWrite32(rdram, 0x6EB964u, 0u);
+            std::cerr << "[game_overrides] TW Warriors: MSS vtable pre-populated at MEM[0x6EB958]=0x5444E0" << std::endl;
+        }
+    }
+
+    PS2Runtime::RecompiledFunction g_origTaskSched = nullptr;
+    void warriorsTaskSchedNullCtxGuard(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (getRegU32(ctx, 4) == 0u)
+        {
+            // Scheduler context not yet initialised — skip entirely, return 0.
+            setReturnS32(ctx, 0);
+            return;
+        }
+        if (g_origTaskSched) g_origTaskSched(rdram, ctx, runtime);
+    }
+
     void applyTwWarriorsBootBypass(PS2Runtime &runtime)
     {
-        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00339A20u, "ret0"))
+        // [TWR-27 run11] Pre-populate MSS vtable as part of sub_0033AFC8 (runs before
+        // sub_001446D0 reads MEM[0x6EB958] via JALR at 0x1447BC).
+        g_orig33AFC8 = runtime.lookupFunction(0x0033AFC8u);
+        if (g_orig33AFC8 && runtime.replaceFunction(0x0033AFC8u, &warriorsMSSVtableInit))
+            std::cerr << "[game_overrides] TW Warriors: MSS vtable init stub on sub_0033AFC8" << std::endl;
+
+        // [TWR-27] Guard the task scheduler against a null context pointer.
+        g_origTaskSched = runtime.lookupFunction(0x00187D28u);
+        if (g_origTaskSched && runtime.replaceFunction(0x00187D28u, &warriorsTaskSchedNullCtxGuard))
+            std::cerr << "[game_overrides] TW Warriors: task-sched null-ctx guard on sub_00187D28" << std::endl;
+
+        // [TWR-27 run11] ret1 so the JALR at 0x42AD64 returns != 0 and
+        // sub_0042A938 continues to create gameplay threads (CreateThread chain).
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00339A20u, "ret1"))
             std::cerr << "[game_overrides] TW Warriors: IOP/MSS boot bypass on sub_339A20 (0x339a20)" << std::endl;
+
+        // [TWR-27] Stub out statically-linked SIF RPC wait/dispatch loop.
+        // sub_00154AE0 spins on hdr.sema_id waiting for IOP hardware ACKs that never
+        // arrive on PC, causing a hang at 0x154b50. Return $a0 (the client data
+        // pointer) which the second call's return value feeds into sub_00154D50.
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00154AE0u, "sub_00154AE0"))
+            std::cerr << "[game_overrides] TW Warriors: SIF RPC wait stub on sub_00154AE0 (0x154ae0)" << std::endl;
+
+        // [TWR-27] Stub out statically-linked SIF RPC call dispatcher.
+        // Called once inside sub_0042A938 after sub_00154AE0; return 0 (success).
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00154D50u, "sub_00154D50"))
+            std::cerr << "[game_overrides] TW Warriors: SIF RPC call stub on sub_00154D50 (0x154d50)" << std::endl;
+
+        // [TWR-27] sub_001859A0 is a linked-list search/remove that runs on a list
+        // initialised by IOP modules that are stubbed. With uninitialised list
+        // pointers it loops forever (observed: ~11M branches/sec, gframe=0 for >2 min).
+        // Stub as ret0 so the caller (sub_0016F128 @ 0x16F1C8) takes the "not found"
+        // branch and continues the boot sequence.
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x001859A0u, "ret0"))
+            std::cerr << "[game_overrides] TW Warriors: linked-list infinite loop stub on sub_001859A0" << std::endl;
+
+        // [TWR-27] sub_00154630 is a CD/IOP stream reader that loops until a2 bytes are
+        // consumed. Called from sub_00398598 with a2=0xFFFFFFFF ("read all available").
+        // With the IOP stubbado the internal vtable callback never fills the buffer
+        // (*(s1+0xC) stays 0), so s0=0 each iteration and s3 never decrements → infinite.
+        // Stub as ret0 (0 bytes read) so the caller continues without the stream data.
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00154630u, "ret0"))
+            std::cerr << "[game_overrides] TW Warriors: IOP stream read stub on sub_00154630" << std::endl;
+
+        // [TWR-27] sub_0015E6B8 polls *(0x50C784) waiting for it to go negative
+        // (IOP async completion flag). With the IOP stubbado the flag never changes
+        // (stays >= 0) and the poll loop at 0x15E6D8 stalls forever (observed x20000+).
+        // Stub as ret0 so callers treat the async op as immediately done.
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x0015E6B8u, "ret0"))
+            std::cerr << "[game_overrides] TW Warriors: IOP async-poll stub on sub_0015E6B8" << std::endl;
+
+        // [TWR-27] sub_00151640 (SOUND_SetINTERNALFastLoad) verifies *(0x5E41C4)==1
+        // (the MSS EE-thread-ready flag). That flag is set to 0 by sub_001513D0 (MSS
+        // init) and only set to 1 when the sound service thread (entry 0x26d070) starts.
+        // That thread is never created because the IOP is stubbed, so *(0x5E41C4) stays
+        // 0 and every call to sub_00151640 prints "EE Thread not initialised" + returns
+        // -1. sub_0042A938 calls it 10+ times across 3 invocations from sub_001446D0,
+        // each failure causing the init sequence to abort early with ExitThread.
+        // Stub as ret0 (success) so the MSS slot registration continues past the flag
+        // check and the game reaches the gameplay-thread creation code.
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00151640u, "ret0"))
+            std::cerr << "[game_overrides] TW Warriors: MSS EE-thread-ready stub on sub_00151640" << std::endl;
+
+        // [TWR-27 run12] sub_00151BC0 is a WaitSema + IOP-state-poll loop.
+        // It waits on sema MEM[0x50C540] and polls MEM[0x50C538]/MEM[0x50C53C]
+        // until both equal 1. With the IOP stubbed those counters stay 0 and
+        // the loop spins forever. Stub as ret0 so callers treat the IOP op as
+        // immediately done; the bookkeeping fields MEM[0x50C538]/0x50C53C are
+        // also forced to 1 so any subsequent checks pass.
+        if (ps2_game_overrides::bindAddressHandler(runtime, 0x00151BC0u, "ret0"))
+            std::cerr << "[game_overrides] TW Warriors: MSS IOP wait-loop stub on sub_00151BC0" << std::endl;
     }
 
     PS2_REGISTER_GAME_OVERRIDE("TW Warriors IOP boot bypass", "SLUS_212.15", 0u, 0u, &applyTwWarriorsBootBypass)
