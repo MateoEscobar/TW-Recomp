@@ -478,15 +478,21 @@ std::string PS2IopHostAdapter::translateGuestPath(std::string_view path) const
             }
         }
 
+        bool firstMiss = false;
         {
             std::lock_guard<std::mutex> lock(m_countersMutex);
             ++m_counters.modulesMissing;
+            firstMiss = m_missingModules.insert(upperAscii(base)).second;
         }
-        emit(ps2x::iop::LogLevel::Error,
-             "module " + std::string(path) + " not found; tried: iso=" + (paths.cdImage.empty() ? "no" : "yes") +
-                 ", " + (paths.hostRoot / "IRX" / base).string() +
-                 ", " + (paths.hostRoot / "Modules" / base).string() +
-                 ", " + (paths.cdRoot / rest).string());
+        // Once per module: the SDK's load loop retries forever and would flood the log.
+        if (firstMiss)
+        {
+            emit(ps2x::iop::LogLevel::Error,
+                 "module " + std::string(path) + " not found; tried: iso=" + (paths.cdImage.empty() ? "no" : "yes") +
+                     ", " + (paths.hostRoot / "IRX" / base).string() +
+                     ", " + (paths.hostRoot / "Modules" / base).string() +
+                     ", " + (paths.cdRoot / rest).string());
+        }
         return {};
     }
 
@@ -769,6 +775,108 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
     return handled;
 }
 
+namespace
+{
+    // The EE server descriptor for `sid`, or 0 when the EE registered nothing (or the entry
+    // is one of our IOP-backed handles, which are not EE servers).
+    uint32_t eeRpcServerDescriptor(uint32_t sid)
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        const auto it = g_rpc_servers.find(sid);
+        if (it == g_rpc_servers.end() || it->second.iopBacked)
+        {
+            return 0u;
+        }
+        return it->second.sd_ptr;
+    }
+}
+
+bool PS2IopHostAdapter::hasGuestRpcServer(uint32_t sid) const
+{
+    const uint32_t sdPtr = eeRpcServerDescriptor(sid);
+    if (sdPtr == 0u)
+    {
+        return false;
+    }
+    const t_SifRpcServerData *sd = reinterpret_cast<const t_SifRpcServerData *>(getMemPtr(activeRdram(), sdPtr));
+    return sd && sd->func != 0u && m_runtime.hasFunction(sd->func);
+}
+
+bool PS2IopHostAdapter::callGuestRpc(uint32_t sid,
+                                     uint32_t function,
+                                     const void *send,
+                                     uint32_t sendSize,
+                                     void *receive,
+                                     uint32_t receiveSize,
+                                     uint32_t *result)
+{
+    if (result)
+    {
+        *result = 0u;
+    }
+    uint8_t *const rdram = activeRdram();
+    const uint32_t sdPtr = eeRpcServerDescriptor(sid);
+    t_SifRpcServerData *sd = sdPtr ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr)) : nullptr;
+    const bool fail = !sd || sd->func == 0u || !m_runtime.hasFunction(sd->func);
+    if (!fail)
+    {
+        // Same contract as the EE SDK's server side: the request lands in the server's receive
+        // buffer (sd->buf), the handler runs as func(fno, buf, size) and returns the reply
+        // pointer (0 = the buffer itself); `receiveSize` bytes of it go back to the IOP.
+        if (sendSize != 0u && send)
+        {
+            if (sd->buf == 0u || !writeGuest(sd->buf, send, sendSize))
+            {
+                return false;
+            }
+        }
+        uint32_t v0 = 0u;
+        R5900Context *context = m_activeContext ? m_activeContext : &m_runtime.cpu();
+        const bool ok = rpcInvokeFunction(rdram, context, &m_runtime, sd->func, function, sd->buf, sendSize, 0u, &v0);
+        if (ok)
+        {
+            uint32_t replyPointer = v0 != 0u ? v0 : sd->buf;
+            if (receiveSize != 0u && receive)
+            {
+                if (replyPointer == 0u || !readGuest(replyPointer, receive, receiveSize))
+                {
+                    std::memset(receive, 0, receiveSize);
+                }
+            }
+            if (result)
+            {
+                *result = v0;
+            }
+        }
+        uint64_t count = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_countersMutex);
+            count = ++m_counters.eeRpcCalls;
+            if (!ok)
+            {
+                ++m_counters.eeRpcFailures;
+            }
+        }
+        if (count <= 32u || !ok)
+        {
+            char line[160];
+            std::snprintf(line, sizeof(line), "ee-rpc sid=0x%08x fn=0x%x send=%u recv=%u func=0x%08x ok=%d v0=0x%08x",
+                          sid, function, sendSize, receiveSize, sd->func, ok ? 1 : 0, v0);
+            emit(ok ? ps2x::iop::LogLevel::Info : ps2x::iop::LogLevel::Warning, line);
+        }
+        return ok;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_countersMutex);
+        ++m_counters.eeRpcCalls;
+        ++m_counters.eeRpcFailures;
+    }
+    char line[96];
+    std::snprintf(line, sizeof(line), "ee-rpc sid=0x%08x fn=0x%x: no EE server", sid, function);
+    emit(ps2x::iop::LogLevel::Warning, line);
+    return false;
+}
+
 void PS2IopHostAdapter::emit(ps2x::iop::LogLevel level, const std::string &message)
 {
     const char *prefix = "[ps2xIOP]";
@@ -793,5 +901,24 @@ void PS2IopHostAdapter::emit(ps2x::iop::LogLevel level, const std::string &messa
 
 void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)
 {
+    // The subsystem repeats the same warning on every retry of a failing operation (an SDK
+    // load loop can issue millions): each distinct warning/error line is printed a bounded
+    // number of times, then suppressed with a single notice.
+    if (level == ps2x::iop::LogLevel::Warning || level == ps2x::iop::LogLevel::Error)
+    {
+        constexpr uint32_t kMaxRepeats = 8u;
+        std::lock_guard<std::mutex> lock(m_countersMutex);
+        uint32_t &count = m_repeatedLogs[std::string(message)];
+        ++count;
+        if (count > kMaxRepeats)
+        {
+            return;
+        }
+        if (count == kMaxRepeats)
+        {
+            emit(level, std::string(message) + " (repeated; further occurrences suppressed)");
+            return;
+        }
+    }
     emit(level, std::string(message));
 }

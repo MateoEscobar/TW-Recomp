@@ -83,14 +83,31 @@ cmake --build build --parallel
 
 ---
 
+## IOP emulado (ps2xIOP) y sus tests
+
+`ps2_runtime` enlaza `ps2x::iop` (`ps2xRecomp/ps2xIOP`, añadido con `add_subdirectory` desde el
+CMake raíz): el intérprete R3000A que ejecuta los IRX reales del disco. Arquitectura, rutas de módulos
+y variables de entorno en [`docs/iop.md`](iop.md). Para correr su suite de tests (4 ejecutables, ctest):
+
+```bash
+cmake -S ps2xRecomp/ps2xIOP -B build-iop-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_IOP_BUILD_TESTS=ON
+cmake --build build-iop-tests --parallel
+ctest --test-dir build-iop-tests --output-on-failure
+```
+
+El submodule apunta al fork `MateoEscobar/PS2Recomp` (rama `feature/iop-sifcmd-ee-rpc`: RPC IOP→EE,
+formateo de `printf`, `sceCdSearchFile` sobre la imagen, arena de sysmem de 1,5 MB).
+
+---
+
 ## Notas técnicas
 
-### Stubs de RenderWare y Miles Sound System
+### Stubs de RenderWare y sonido
 
-Las funciones `rwXxx`/`rpXxx` (RenderWare) y `AIL_xxx` (Miles Sound System) están
-**completamente stripped** del ELF — no aparecen en el mapa de funciones. ps2xRecomp
-las recompila como funciones normales del juego. Las implementaciones nativas reales
-se agregarán en TWR-13 (stubs SDK+RW) y TWR-17 (audio MSS).
+Las funciones `rwXxx`/`rpXxx` (RenderWare) y la librería de sonido del EE (`SOUND_*`, Sony
+MultiStream — no Miles, ver TWR-28) están **completamente stripped** del ELF — no aparecen en el
+mapa de funciones. ps2xRecomp las recompila como funciones normales del juego. El renderer nativo
+es el Epic TWR-3; el sonido corre en el IOP emulado (`docs/iop.md`) y el audio audible es TWR-30.
 
 ### Fallbacks indirectos (JR/JALR)
 

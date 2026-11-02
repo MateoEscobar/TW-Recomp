@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 class PS2Runtime;
 struct R5900Context;
@@ -94,6 +95,16 @@ public:
                              uint32_t a3,
                              uint32_t *resultAddress) override;
     bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override;
+    // IOP -> EE RPC: the IRX's sceSifBindRpc/sceSifCallRpc reach the servers the EE registered
+    // with SifRegisterRpc (g_rpc_servers with func != 0, e.g. MultiStream's 0x12344321).
+    bool hasGuestRpcServer(uint32_t sid) const override;
+    bool callGuestRpc(uint32_t sid,
+                      uint32_t function,
+                      const void *send,
+                      uint32_t sendSize,
+                      void *receive,
+                      uint32_t receiveSize,
+                      uint32_t *result) override;
 
     void log(ps2x::iop::LogLevel level, std::string_view message) override;
 
@@ -105,6 +116,8 @@ public:
         uint64_t guestInvocationFailures = 0;
         uint64_t sifCommands = 0;
         uint64_t sifCommandsUnhandled = 0;
+        uint64_t eeRpcCalls = 0;
+        uint64_t eeRpcFailures = 0;
         uint64_t modulesFromIso = 0;
         uint64_t modulesFromHost = 0;
         uint64_t modulesMissing = 0;
@@ -135,4 +148,6 @@ private:
     uint64_t m_nextHostFileHandle = 1u;
     mutable std::mutex m_countersMutex;
     mutable Counters m_counters;
+    mutable std::unordered_set<std::string> m_missingModules; // guarded by m_countersMutex
+    std::unordered_map<std::string, uint32_t> m_repeatedLogs;   // guarded by m_countersMutex
 };

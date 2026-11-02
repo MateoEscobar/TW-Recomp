@@ -408,14 +408,28 @@ namespace ps2_stubs
         // [TWR-29] Reserved in the emulated IOP's RAM so the address the EE gets back is one the
         // IRX modules (sysmem) and the SIF DMA agree on. 64-byte alignment matches the SDK.
         const uint32_t reqSize = getRegU32(ctx, 4);
-        setReturnU32(ctx, runtime ? runtime->allocateIopMemory(reqSize, 64u) : 0u);
+        const uint32_t addr = runtime ? runtime->allocateIopMemory(reqSize, 64u) : 0u;
+        {
+            static std::atomic<uint32_t> s_n{0};
+            if (s_n.fetch_add(1) < 32u)
+                std::cerr << "[sifheap] AllocIopHeap size=0x" << std::hex << reqSize
+                          << " -> 0x" << addr << std::dec << std::endl;
+        }
+        setReturnU32(ctx, addr);
     }
 
     void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
         const uint32_t size = getRegU32(ctx, 5);
-        setReturnU32(ctx, runtime ? runtime->allocateIopMemory(size, 64u) : 0u);
+        const uint32_t addr = runtime ? runtime->allocateIopMemory(size, 64u) : 0u;
+        {
+            static std::atomic<uint32_t> s_n{0};
+            if (s_n.fetch_add(1) < 32u)
+                std::cerr << "[sifheap] AllocSysMemory size=0x" << std::hex << size
+                          << " -> 0x" << addr << std::dec << std::endl;
+        }
+        setReturnU32(ctx, addr);
     }
 
     void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

@@ -1488,10 +1488,19 @@ namespace ps2_syscalls
                                                    static_cast<uint32_t>(arguments.size()));
         if (!loaded.handled || loaded.moduleId <= 0)
         {
-            std::cerr << "[ps2xIOP] loadModule failed path=\"" << modulePath
-                      << "\" handled=" << (loaded.handled ? 1 : 0)
-                      << " moduleId=" << loaded.moduleId
-                      << " startResult=" << loaded.startResult << std::endl;
+            // Once per path: the SDK retries a failed sceSifLoadModule in a tight loop.
+            static std::mutex s_failMx;
+            static std::unordered_set<std::string> s_failed;
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lk(s_failMx);
+                first = s_failed.insert(modulePath).second;
+            }
+            if (first)
+                std::cerr << "[ps2xIOP] loadModule failed path=\"" << modulePath
+                          << "\" handled=" << (loaded.handled ? 1 : 0)
+                          << " moduleId=" << loaded.moduleId
+                          << " startResult=" << loaded.startResult << std::endl;
             setReturnS32(ctx, -1);
             return;
         }
