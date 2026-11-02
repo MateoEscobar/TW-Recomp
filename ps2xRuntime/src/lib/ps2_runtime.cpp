@@ -6470,6 +6470,11 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
     if (t_accum < kSliceCycles)
         return false;
     t_accum = 0;
+    // [TWR-29] Every expired slice also advances the emulated IOP by the same EE cycles, so
+    // IRX threads, timers and cdvd progress while the EE runs (not only when it does RPC).
+    // Counted per vblank so pumpIopForVsync only pays the remainder.
+    advanceIopEeCycles(kSliceCycles);
+    m_iopCyclesSinceVsync.fetch_add(kSliceCycles, std::memory_order_relaxed);
     if (!m_schedEnabled)
         return false;
     schedYield(g_schedTid);
@@ -9722,21 +9727,30 @@ ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModule(std::string_view path, con
 {
     std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
-    return m_iopSubsystem->loadModule(path, arguments, argumentSize);
+    m_iopCallDepth.fetch_add(1, std::memory_order_relaxed);
+    const auto result_ = m_iopSubsystem->loadModule(path, arguments, argumentSize);
+    m_iopCallDepth.fetch_sub(1, std::memory_order_relaxed);
+    return result_;
 }
 
 ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
 {
     std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
-    return m_iopSubsystem->loadModuleBuffer(guestAddress, arguments, argumentSize);
+    m_iopCallDepth.fetch_add(1, std::memory_order_relaxed);
+    const auto result_ = m_iopSubsystem->loadModuleBuffer(guestAddress, arguments, argumentSize);
+    m_iopCallDepth.fetch_sub(1, std::memory_order_relaxed);
+    return result_;
 }
 
 bool PS2Runtime::stopIopModule(int32_t moduleId, int32_t *result)
 {
     std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
-    return m_iopSubsystem->stopModule(moduleId, result);
+    m_iopCallDepth.fetch_add(1, std::memory_order_relaxed);
+    const auto result_ = m_iopSubsystem->stopModule(moduleId, result);
+    m_iopCallDepth.fetch_sub(1, std::memory_order_relaxed);
+    return result_;
 }
 
 ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
@@ -9756,7 +9770,10 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
     std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
     auto scope = m_iopHost->enterCall(ctx, rdram);
     request.callToken = scope.token();
-    return m_iopSubsystem->handleRpc(request);
+    m_iopCallDepth.fetch_add(1, std::memory_order_relaxed);
+    const auto result_ = m_iopSubsystem->handleRpc(request);
+    m_iopCallDepth.fetch_sub(1, std::memory_order_relaxed);
+    return result_;
 }
 
 void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
@@ -9773,8 +9790,18 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_iopMutex);
+    // Re-entrancy: an IRX RPC handler can call back into the EE (sceSifSendCmd -> recompiled
+    // handler), whose backward edges hit eeCheckpointDue -> here. The interpreter is already
+    // mid-call on this thread; running it again would corrupt that call. Skip: the cycles are
+    // not lost, the vblank debt catches them up.
+    if (m_iopCallDepth.load(std::memory_order_relaxed) > 0)
+    {
+        return;
+    }
     auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    m_iopCallDepth.fetch_add(1, std::memory_order_relaxed);
     m_iopSubsystem->runEeCycles(eeCycles);
+    m_iopCallDepth.fetch_sub(1, std::memory_order_relaxed);
 }
 
 void PS2Runtime::pumpIopForVsync() noexcept

@@ -12,6 +12,10 @@ games/warriors/assets/
 games/warriors/SLUS_*
 games/warriors/*.iso
 games/warriors/*.img
+# [TWR-29] IRX modules extracted from the disc for the emulated IOP (fallback when
+# PS2X_CD_IMAGE is not set). Game data: never committed.
+games/warriors/IRX/
+games/warriors/Modules/
 *.iso
 *.img
 *.7z

@@ -8258,14 +8258,16 @@ namespace
     PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
     PS2_REGISTER_GAME_OVERRIDE("LotR sound RPC compat", "SLUS_205.78", 0u, 0u, &applyLotrSoundRpcCompat);
     PS2_REGISTER_GAME_OVERRIDE("Warriors sound init bypass", "SLUS_212.15", 0u, 0u, &applyBt3SoundInitBypass);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors DTX sound URPC compat", "SLUS_212.15", 0u, 0u, &applyBt3DtxCompat);
+    // [TWR-29] "Warriors DTX sound URPC compat" (applyBt3DtxCompat) is no longer registered:
+    // the game's IOP.IRX (Sony MultiStream, SID 0x12345) now runs on the emulated IOP and the
+    // DTX layer in RPC.cpp/SIF.cpp must stay inert (dtxCompat.isConfigured() == false). The
+    // layer itself is removed with the EE-side audio path in TWR-30/31.
     PS2_REGISTER_GAME_OVERRIDE("Warriors sceMpeg callback stubs", "SLUS_212.15", 0u, 0u, &applyBt3MpegCallbackStubs);
-    // [modules] The same five, registered for the install's renamed boot ELF. The matcher keys on the
+    // [modules] The same, registered for the install's renamed boot ELF. The matcher keys on the
     // ELF's BASENAME and every Warriors descriptor carries crc32 = 0, so the name is the only criterion --
     // an install that ships the ELF as data/Modules/BOOT would otherwise lose all of them with no
     // error at all. One descriptor matches either name (the other `continue`s), so nothing applies twice.
     PS2_REGISTER_GAME_OVERRIDE("Warriors sound init bypass", "BOOT", 0u, 0u, &applyBt3SoundInitBypass);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors DTX sound URPC compat", "BOOT", 0u, 0u, &applyBt3DtxCompat);
     PS2_REGISTER_GAME_OVERRIDE("Warriors sceMpeg callback stubs", "BOOT", 0u, 0u, &applyBt3MpegCallbackStubs);
     // [nullpkt] The infinite-loading freeze: func_114860 (texture-packet address patcher) is
     // called with a NULL packet list (a1 = [obj+0x2C] not populated yet) and walks it as a

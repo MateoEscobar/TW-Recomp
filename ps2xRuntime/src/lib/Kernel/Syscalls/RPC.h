@@ -26,4 +26,11 @@ namespace ps2_syscalls
     void sceSifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // [TWR-29] Run a recompiled EE function synchronously on the calling thread with a private
+    // context/stack (rpcInvokeFunction). Used by the SIF command dispatcher and the IOP host
+    // adapter for IOP -> EE calls. `ctx` is the template context (nullptr = runtime->cpu()).
+    bool invokeGuestFunctionSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
+                                 uint32_t funcAddr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                 uint32_t *outV0);
 }

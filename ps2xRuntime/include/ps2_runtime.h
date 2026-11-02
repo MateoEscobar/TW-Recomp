@@ -843,6 +843,7 @@ private:
     std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
     mutable std::recursive_mutex m_iopMutex;
     std::atomic<uint64_t> m_iopCyclesSinceVsync{0u};
+    std::atomic<int> m_iopCallDepth{0};   // >0 while the interpreter runs a call on some thread
 
 public:
     std::atomic<uint32_t> m_debugPc{0};

@@ -121,6 +121,98 @@ namespace
         return moduleId;
     }
 
+    // [TWR-29] Copy `size` guest bytes at `guestAddr` (IRX argument block) into `out`, bounded.
+    // An empty block (size 0 or no address) is valid and yields an empty vector.
+    bool copyGuestBytesBounded(const uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint32_t maxBytes, std::vector<uint8_t> &out)
+    {
+        out.clear();
+        if (size == 0u || guestAddr == 0u)
+        {
+            return true;
+        }
+        if (!rdram || size > maxBytes)
+        {
+            return false;
+        }
+        out.resize(size);
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            const uint8_t *src = getConstMemPtr(rdram, guestAddr + i);
+            if (!src)
+            {
+                out.clear();
+                return false;
+            }
+            out[i] = *src;
+        }
+        return true;
+    }
+
+    // [TWR-29] Register a module whose id was assigned by the emulated IOP (ps2xIOP) so the
+    // id the EE sees is the IOP's own and SifStopModule can route it back. Ported from the
+    // upstream runtime (trackSifModuleLoadExternal).
+    int32_t trackSifModuleLoadExternal(const std::string &path, int32_t moduleId)
+    {
+        if (path.empty() || moduleId <= 0)
+        {
+            return -1;
+        }
+
+        const std::string pathKey = normalizeSifModulePathKey(path);
+        if (pathKey.empty())
+        {
+            return -1;
+        }
+
+        std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+
+        auto idIt = g_sif_modules_by_id.find(moduleId);
+        if (idIt != g_sif_modules_by_id.end())
+        {
+            SifModuleRecord &record = idIt->second;
+            if (record.pathKey == pathKey)
+            {
+                record.loaded = true;
+                ++record.refCount;
+                return moduleId;
+            }
+
+            if (!record.pathKey.empty())
+            {
+                auto oldPathIt = g_sif_module_id_by_path.find(record.pathKey);
+                if (oldPathIt != g_sif_module_id_by_path.end() && oldPathIt->second == moduleId)
+                {
+                    g_sif_module_id_by_path.erase(oldPathIt);
+                }
+            }
+        }
+
+        auto pathIt = g_sif_module_id_by_path.find(pathKey);
+        if (pathIt != g_sif_module_id_by_path.end() && pathIt->second != moduleId)
+        {
+            auto oldIt = g_sif_modules_by_id.find(pathIt->second);
+            if (oldIt != g_sif_modules_by_id.end())
+            {
+                oldIt->second.loaded = false;
+                oldIt->second.refCount = 0;
+            }
+        }
+
+        SifModuleRecord record;
+        record.id = moduleId;
+        record.path = path;
+        record.pathKey = pathKey;
+        record.refCount = 1;
+        record.loaded = true;
+        g_sif_module_id_by_path[pathKey] = moduleId;
+        g_sif_modules_by_id[moduleId] = std::move(record);
+        if (moduleId >= g_next_sif_module_id)
+        {
+            g_next_sif_module_id = moduleId + 1;
+        }
+        return moduleId;
+    }
+
     bool trackSifModuleStop(int32_t moduleId, uint32_t *remainingRefs = nullptr)
     {
         if (moduleId <= 0)

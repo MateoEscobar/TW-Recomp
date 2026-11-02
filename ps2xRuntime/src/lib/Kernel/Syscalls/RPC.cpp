@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "RPC.h"
+#include "../../ps2_iop_transport.h"   // [TWR-29] emulated IOP (ps2xIOP)
 
 extern Ps2ArmedAtomic<uint32_t> g_ps2WatchLo;   // [tracearm] (Common.h pulls in ps2_runtime.h)
 extern Ps2ArmedAtomic<uint32_t> g_ps2WatchHi;
@@ -1390,25 +1391,41 @@ namespace ps2_syscalls
         (void)size;
     }
 
+    bool invokeGuestFunctionSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
+                                 uint32_t funcAddr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                 uint32_t *outV0)
+    {
+        if (!runtime)
+        {
+            return false;
+        }
+        R5900Context *templateCtx = ctx ? ctx : &runtime->cpu();
+        return rpcInvokeFunction(rdram, templateCtx, runtime, funcAddr, a0, a1, a2, a3, outV0);
+    }
+
     void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const int32_t moduleId = static_cast<int32_t>(getRegU32(ctx, 4)); // $a0
         const uint32_t resultAddr = getRegU32(ctx, 7);                    // $a3 (int* result, optional)
 
+        // [TWR-29] The module runs on the emulated IOP: stop it there first, then drop the
+        // EE-side tracking record (kept for the IOP/SIF panel and for id stability).
+        int32_t moduleResult = -1;
+        const bool stoppedByEmulator = runtime && runtime->stopIopModule(moduleId, &moduleResult);
         uint32_t refsLeft = 0;
         const bool knownModule = trackSifModuleStop(moduleId, &refsLeft);
-        const int32_t ret = knownModule ? 0 : -1;
+        const int32_t ret = (stoppedByEmulator || knownModule) ? 0 : -1;
 
         if (resultAddr != 0)
         {
             int32_t *hostResult = reinterpret_cast<int32_t *>(getMemPtr(rdram, resultAddr));
             if (hostResult)
             {
-                *hostResult = knownModule ? 0 : -1;
+                *hostResult = stoppedByEmulator ? moduleResult : (knownModule ? 0 : -1);
             }
         }
 
-        if (knownModule)
+        if (stoppedByEmulator || knownModule)
         {
             std::string modulePath;
             {
@@ -1419,7 +1436,7 @@ namespace ps2_syscalls
                     modulePath = it->second.path;
                 }
             }
-            logSifModuleAction("stop", moduleId, modulePath, refsLeft);
+            logSifModuleAction(stoppedByEmulator ? "stop-emulated" : "stop", moduleId, modulePath, refsLeft);
         }
 
         setReturnS32(ctx, ret);
@@ -1427,7 +1444,9 @@ namespace ps2_syscalls
 
     void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t pathAddr = getRegU32(ctx, 4); // $a0
+        const uint32_t pathAddr = getRegU32(ctx, 4);     // $a0
+        const uint32_t argumentSize = getRegU32(ctx, 5); // $a1
+        const uint32_t argumentAddr = getRegU32(ctx, 6); // $a2
         const std::string modulePath = readGuestCStringBounded(rdram, pathAddr, kMaxSifModulePathBytes);
         if (modulePath.empty())
         {
@@ -1435,25 +1454,8 @@ namespace ps2_syscalls
             return;
         }
 
-        const int32_t moduleId = trackSifModuleLoad(modulePath);
-        if (moduleId <= 0)
-        {
-            setReturnS32(ctx, -1);
-            return;
-        }
-
-        uint32_t refs = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_sif_module_mutex);
-            auto it = g_sif_modules_by_id.find(moduleId);
-            if (it != g_sif_modules_by_id.end())
-            {
-                refs = it->second.refCount;
-            }
-        }
-        logSifModuleAction("load", moduleId, modulePath, refs);
-
-        // [r3000 diag] PS2X_IOP_LOADLOG: list every module the game loads (once each).
+        // [diag] PS2X_IOP_LOADLOG: list every module the game asks for (once each), before the
+        // load so a module that fails to resolve still shows up here.
         if (const char *ll = std::getenv("PS2X_IOP_LOADLOG"); ll && ll[0] && ll[0] != '0')
         {
             static std::mutex s_mx;
@@ -1463,35 +1465,43 @@ namespace ps2_syscalls
                 std::cerr << "[iop-load] " << modulePath << std::endl;
         }
 
-        // [r3000] Recompiled IOP modules: when the game loads one, map the IRX into IOP RAM and
-        // run its entry natively. Selectable with PS2X_IOP_MODULES (comma list of stems, or "all");
-        // default is the validated set. Lets us isolate which module breaks the boot.
+        std::vector<uint8_t> arguments;
+        constexpr uint32_t kMaxIopModuleArguments = 64u * 1024u;
+        if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
         {
-            std::string base = modulePath;
-            const size_t slash = base.find_last_of("/\\");
-            if (slash != std::string::npos) base = base.substr(slash + 1);
-            const size_t semi = base.find(';');   // ISO9660 version suffix (";1")
-            if (semi != std::string::npos) base = base.substr(0, semi);
-            std::string stem = base;
-            const size_t dot = stem.find('.');
-            if (dot != std::string::npos) stem = stem.substr(0, dot);
-
-            std::string set = "all";   // every integrated IRX runs native; see tools/iop/README.md
-            if (const char *m = std::getenv("PS2X_IOP_MODULES"); m && m[0]) set = m;
-            bool wantNative = (set == "all");
-            for (size_t p = 0; !wantNative && p <= set.size();)
-            {
-                const size_t c = set.find(',', p);
-                if (set.substr(p, c == std::string::npos ? std::string::npos : c - p) == stem)
-                    wantNative = true;
-                if (c == std::string::npos) break;
-                p = c + 1;
-            }
-            if (wantNative)
-                runtime->loadAndRunIopModule(PS2Runtime::resolveIopModulePath(base).c_str());
+            setReturnS32(ctx, -1);
+            return;
         }
 
-        setReturnS32(ctx, moduleId);
+        if (!runtime)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        // [TWR-29] The IRX is loaded and started by the emulated IOP (ps2xIOP); the host
+        // adapter resolves cdrom0:/host0: paths (ISO by LBA, then games/warriors/{IRX,Modules}).
+        // A module the adapter cannot find comes back unhandled: the EE gets -1 like on real
+        // hardware when the file is missing, and the adapter has already logged where it looked.
+        const auto loaded = runtime->loadIopModule(modulePath,
+                                                   arguments.empty() ? nullptr : arguments.data(),
+                                                   static_cast<uint32_t>(arguments.size()));
+        if (!loaded.handled || loaded.moduleId <= 0)
+        {
+            std::cerr << "[ps2xIOP] loadModule failed path=\"" << modulePath
+                      << "\" handled=" << (loaded.handled ? 1 : 0)
+                      << " moduleId=" << loaded.moduleId
+                      << " startResult=" << loaded.startResult << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        trackSifModuleLoadExternal(modulePath, loaded.moduleId);
+        logSifModuleAction("load-emulated", loaded.moduleId, modulePath, 1u);
+        std::cerr << "[ps2xIOP] loadModule path=\"" << modulePath
+                  << "\" handled=1 moduleId=" << loaded.moduleId
+                  << " startResult=" << loaded.startResult << std::endl;
+        setReturnS32(ctx, loaded.moduleId);
     }
 
     void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1573,6 +1583,8 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t serverPtr = 0;
+        bool iopBacked = false;
+        bool dummyServer = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             client->hdr.rpc_id = g_rpc_next_id++;
@@ -1580,14 +1592,60 @@ namespace ps2_syscalls
             if (it != g_rpc_servers.end())
             {
                 serverPtr = it->second.sd_ptr;
+                iopBacked = it->second.iopBacked;
             }
             g_rpc_clients[clientPtr] = {};
             g_rpc_clients[clientPtr].sid = rpcId;
         }
 
-        if (!serverPtr)
+        // [TWR-29] An IRX registers its RPC server from its own thread, i.e. only once the
+        // emulated IOP has run some cycles after sceSifLoadModule returned. The SDK's bind loop
+        // would retry, but the placeholder below would satisfy it first -- so give the IOP a
+        // bounded budget (~50 ms of IOP time; a sleeping kernel costs almost nothing) before
+        // deciding that nobody provides the SID.
+        if (!serverPtr && runtime && !PS2IopTransport::canBindRpc(runtime, rpcId))
         {
-            // Allocate a dummy server so bind loops can proceed.
+            constexpr uint64_t kBindPumpSlice = 65536ull * 4ull;
+            constexpr uint32_t kBindPumpSlices = 64u;
+            for (uint32_t i = 0; i < kBindPumpSlices && !PS2IopTransport::canBindRpc(runtime, rpcId); ++i)
+            {
+                runtime->advanceIopEeCycles(kBindPumpSlice);
+            }
+        }
+
+        if (!serverPtr && PS2IopTransport::canBindRpc(runtime, rpcId))
+        {
+            // [TWR-29] The SID is registered by an IRX running on the emulated IOP. The EE still
+            // needs a descriptor in guest RAM (the SDK dereferences cd->server), but it is only
+            // a handle: func stays 0 and SifCallRpc routes the call to the IOP. Published only
+            // once the IRX has registered the SID -- cd->server == 0 is the SDK's retry signal
+            // while the IOP server thread is still starting.
+            serverPtr = rpcAllocServerAddr(rdram);
+            if (serverPtr)
+            {
+                t_SifRpcServerData *handle = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
+                if (handle)
+                {
+                    std::memset(handle, 0, sizeof(*handle));
+                    handle->sid = static_cast<int>(rpcId);
+                }
+                std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                g_rpc_servers[rpcId] = {rpcId, serverPtr, true};
+                iopBacked = true;
+            }
+        }
+        else if (!serverPtr)
+        {
+            // No provider anywhere (neither an EE server nor the emulated IOP): keep the historic
+            // placeholder so bind loops terminate, and say so once per SID.
+            {
+                static std::mutex s_mx;
+                static std::unordered_set<uint32_t> s_warned;
+                std::lock_guard<std::mutex> lk(s_mx);
+                if (s_warned.insert(rpcId).second)
+                    std::cerr << "[bind] no IOP provider sid=0x" << std::hex << rpcId
+                              << std::dec << " -- dummy server descriptor" << std::endl;
+            }
             serverPtr = rpcAllocServerAddr(rdram);
             if (serverPtr)
             {
@@ -1598,7 +1656,8 @@ namespace ps2_syscalls
                     dummy->sid = static_cast<int>(rpcId);
                 }
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
-                g_rpc_servers[rpcId] = {rpcId, serverPtr};
+                g_rpc_servers[rpcId] = {rpcId, serverPtr, false};
+                dummyServer = true;
             }
         }
 
@@ -1621,6 +1680,8 @@ namespace ps2_syscalls
         event.serverPtr = serverPtr;
         event.sid = rpcId;
         event.mode = mode;
+        event.flags = (iopBacked ? kSifRpcDebugFlagIopServer : 0u) |
+                      (dummyServer ? kSifRpcDebugFlagDummyServer : 0u);
         event.result = 0;
         pushSifRpcDebugEvent(event);
         setReturnS32(ctx, 0);
@@ -1708,6 +1769,19 @@ namespace ps2_syscalls
                 boundSidHint = it->second.sid;
             }
         }
+
+        // [TWR-29] Let the emulated IOP pick the calling convention when it knows the SID
+        // (its services may require the stack pack); RuntimeDefault keeps the heuristic below.
+        ps2x::iop::RpcAbi selectedAbi = ps2x::iop::RpcAbi::RuntimeDefault;
+        if (runtime)
+        {
+            ps2x::iop::RpcAbiRequest abiRequest{};
+            abiRequest.boundSid = boundSidHint;
+            abiRequest.function = rpcNum;
+            abiRequest.registers = {sendSizeReg, recvBufReg, recvSizeReg, endFuncReg, endParamReg, regPackPlausible};
+            abiRequest.stack = {sendSizeStk, recvBufStk, recvSizeStk, endFuncStk, endParamStk, stackPackPlausible};
+            selectedAbi = PS2IopTransport::selectRpcAbi(runtime, abiRequest);
+        }
         PS2DtxCompatLayout dtxCompat{};
         {
             std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
@@ -1730,7 +1804,15 @@ namespace ps2_syscalls
             !looksLikeDtxCreatePack(sendSizeReg, recvBufReg, recvSizeReg);
 
         bool useRegConvention = true;
-        if (forceStackForDtxCreate34)
+        if (selectedAbi == ps2x::iop::RpcAbi::Stack)
+        {
+            useRegConvention = false;
+        }
+        else if (selectedAbi == ps2x::iop::RpcAbi::Registers)
+        {
+            useRegConvention = true;
+        }
+        else if (forceStackForDtxCreate34)
         {
             useRegConvention = false;
         }
@@ -1849,8 +1931,58 @@ namespace ps2_syscalls
 
         uint32_t resultPtr = 0;
         bool handled = false;
-        bool handledByIop = false;
+        bool handledByIop = false;          // legacy EE-side HLE (ps2_iop::handleRPC)
+        bool handledByEmulatedIop = false;  // [TWR-29] served by an IRX on ps2xIOP
         bool callbackInvokedForDebug = false;
+
+        // [TWR-29] An IRX registered on the emulated IOP is authoritative for its SID: the call
+        // goes there first, synchronously, before the EE-side HLE (which maps 0x12345 to the LotR
+        // sound driver) and before the DTX layer. The IOP writes the reply straight into the
+        // EE receive buffer and tells us how completion must be signalled.
+        ps2x::iop::RpcResult iopResult{};
+        const bool iopProvidesSid = runtime && sid != 0u && PS2IopTransport::canBindRpc(runtime, sid);
+        if (!handled && iopProvidesSid)
+        {
+            ps2x::iop::RpcRequest request{};
+            request.clientAddress = clientPtr;
+            request.serverAddress = serverPtr;
+            request.serverFunction = sd ? sd->func : 0u;
+            request.serverBuffer = sd ? sd->buf : 0u;
+            request.sid = sid;
+            request.function = rpcNum;
+            request.mode = mode;
+            request.send = {sendBuf, sendSize};
+            request.receive = {recvBuf, recvSize};
+            request.endFunction = endFunc;
+            request.endParameter = endParam;
+            iopResult = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
+            if (iopResult.handled)
+            {
+                handled = true;
+                handledByEmulatedIop = true;
+                resultPtr = iopResult.resultAddress;
+                if (resultPtr == 0u && recvBuf != 0u)
+                {
+                    resultPtr = recvBuf;
+                }
+                // Completion is signalled exactly once. When the game installed an end callback
+                // the callback (run below, unless the IOP suppressed it) is what signals; the
+                // fallback there covers an unresolvable callback.
+                const bool callbackPending = endFunc != 0u &&
+                                             iopResult.callbackPolicy != ps2x::iop::CallbackPolicy::Suppress;
+                const bool wantsSignal = iopResult.signalCompletion ||
+                                         (iopResult.signalNowaitCompletion && (mode & kSifRpcModeNowait) != 0u);
+                if (wantsSignal && !callbackPending)
+                {
+                    uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+                    if (semaId == 0xFFFFFFFFu || semaId == 0u)
+                    {
+                        semaId = endParam;
+                    }
+                    (void)signalRpcCompletionSema(semaId);
+                }
+            }
+        }
 
         auto readRpcU32 = [&](uint32_t addr, uint32_t &out) -> bool
         {
@@ -1882,7 +2014,7 @@ namespace ps2_syscalls
             return true;
         };
 
-        if (!handled && runtime)
+        if (!handled && runtime && !iopProvidesSid)
         {
             runtime->iop().init(rdram);
             uint32_t iopResultPtr = 0u;
@@ -1934,7 +2066,10 @@ namespace ps2_syscalls
         const bool allowServerDispatch = !isDtxUrpc || hasUrpcHandler;
         const bool isDtxSid = dtxCompat.isConfigured() && sid == dtxCompat.rpcSid;
 
-        if (sd && sd->func && (!isDtxSid || isDtxUrpc) && allowServerDispatch)
+        const bool iopSuppressedServerDispatch =
+            handledByEmulatedIop && iopResult.serverDispatchPolicy == ps2x::iop::ServerDispatchPolicy::Suppress;
+        if (sd && sd->func && !handledByEmulatedIop && !iopSuppressedServerDispatch &&
+            (!isDtxSid || isDtxUrpc) && allowServerDispatch)
         {
             dtxUrpcDispatchAttempted = dtxUrpcDispatchAttempted || isDtxUrpc;
             handled = rpcInvokeFunction(rdram, ctx, runtime, sd->func, rpcNum, sd->buf, sendSize, 0, &resultPtr);
@@ -2550,7 +2685,9 @@ namespace ps2_syscalls
             }
         }
 
-        if (endFunc)
+        const bool iopSuppressedCallback =
+            handledByEmulatedIop && iopResult.callbackPolicy == ps2x::iop::CallbackPolicy::Suppress;
+        if (endFunc && !iopSuppressedCallback)
         {
             PS2SoundDriverCompatLayout soundCompat{};
             {
@@ -2655,6 +2792,7 @@ namespace ps2_syscalls
                               << " nowait=" << std::dec << ((mode & kSifRpcModeNowait) ? 1 : 0)
                               << " endFn=0x" << std::hex << endFunc
                               << " hleIop=" << std::dec << (handledByIop ? 1 : 0)
+                              << " iop=" << (handledByEmulatedIop ? 1 : 0)
                               << " cb=" << (callbackInvokedForDebug ? 1 : 0)
                               << " res=0x" << std::hex << resultPtr
                               << " send=[0x" << s0 << ",0x" << s1 << "]"
@@ -2686,6 +2824,7 @@ namespace ps2_syscalls
         event.semaId = client ? static_cast<uint32_t>(client->hdr.sema_id) : 0u;
         event.flags = ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u) |
                       (handledByIop ? kSifRpcDebugFlagHandledByHle : 0u) |
+                      (handledByEmulatedIop ? kSifRpcDebugFlagIopServer : 0u) |
                       (callbackInvokedForDebug ? kSifRpcDebugFlagCallback : 0u) |
                       ((sd && sd->func) ? kSifRpcDebugFlagServerDispatch : 0u) |
                       ((isDtxSid || isDtxUrpc) ? kSifRpcDebugFlagDtx : 0u);

@@ -757,23 +757,16 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
                                        const void *packet,
                                        size_t packetSize)
 {
-    // Wired to the EE command dispatcher (ps2_stubs::dispatchSifCommand) in the IOP->EE
-    // commit; until then the packet is counted and reported so a driver that depends on it
-    // is visible in the log instead of failing silently.
-    (void)packet;
-    uint64_t count = 0;
+    // IOP -> EE: the packet reaches the handler the EE registered with sceSifAddCmdHandler,
+    // synchronously on this thread (the EE thread that entered the IOP, or the pump's).
+    const bool handled = ps2_stubs::dispatchSifCommand(activeRdram(), &m_runtime, commandId, packet, packetSize);
+    std::lock_guard<std::mutex> lock(m_countersMutex);
+    ++m_counters.sifCommands;
+    if (!handled)
     {
-        std::lock_guard<std::mutex> lock(m_countersMutex);
-        ++m_counters.sifCommands;
-        count = ++m_counters.sifCommandsUnhandled;
+        ++m_counters.sifCommandsUnhandled;
     }
-    if (count <= 16u)
-    {
-        char line[96];
-        std::snprintf(line, sizeof(line), "sendSifCommand cid=0x%x size=%zu: no EE dispatcher yet", commandId, packetSize);
-        emit(ps2x::iop::LogLevel::Warning, line);
-    }
-    return false;
+    return handled;
 }
 
 void PS2IopHostAdapter::emit(ps2x::iop::LogLevel level, const std::string &message)
