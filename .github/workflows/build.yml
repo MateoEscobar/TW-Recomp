@@ -61,6 +61,17 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      # [TWR-29] The emulated IOP (ps2xRecomp/ps2xIOP) ships its own test suite. Built standalone
+      # so it never depends on the game runtime's unity build and runs in seconds.
+      - name: Configure ps2xIOP tests
+        run: cmake -S ps2xRecomp/ps2xIOP -B build-iop-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_IOP_BUILD_TESTS=ON
+
+      - name: Build ps2xIOP tests
+        run: cmake --build build-iop-tests --parallel
+
+      - name: ps2xIOP tests
+        run: ctest --test-dir build-iop-tests --output-on-failure
+
       - name: Package Windows release
         if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh

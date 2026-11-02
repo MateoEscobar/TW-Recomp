@@ -336,6 +336,14 @@ namespace ps2_syscalls
         ps2xSchedSignal();   // [fibers] the vsync waiters' predicate just moved
         updateGsCsrFieldForVSync(runtime, tickValue);
 
+        // [TWR-29] Let the emulated IOP catch up to one field of EE time. Guarantees progress
+        // for IRX threads/timers even when every EE thread is asleep waiting for the IOP (a
+        // WaitSema on a MultiStream end-callback would otherwise never be signalled).
+        if (runtime)
+        {
+            runtime->pumpIopForVsync();
+        }
+
         if (reg.flagAddr != 0u)
         {
             writeGuestU32NoThrow(rdram, reg.flagAddr, 1u);

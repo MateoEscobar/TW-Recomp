@@ -4,6 +4,16 @@
 
 namespace ps2_stubs
 {
+    // [TWR-29] Deliver an IOP -> EE SIF command packet (sceSifSendCmd on the IOP side, via
+    // ps2x::iop::IopHost::sendSifCommand) to the handler the EE registered with
+    // sceSifAddCmdHandler. Synchronous on the calling thread. Returns false when no handler is
+    // registered or the packet is malformed; the IOP treats that as a completed DMA anyway.
+    bool dispatchSifCommand(uint8_t *rdram,
+                            PS2Runtime *runtime,
+                            uint32_t commandId,
+                            const void *packet,
+                            size_t packetSize) noexcept;
+
     void sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

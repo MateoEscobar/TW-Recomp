@@ -1,4 +1,5 @@
 #include "runtime/ps2_iop.h"
+#include "runtime/ps2_iso9660.h"   // [TWR-29]
 #include "runtime/ps2_coverage.h"
 #include "runtime/ps2_iop_audio.h"
 #include "runtime/ps2_iop_cl.h"
@@ -16,95 +17,15 @@
 #include <atomic>
 #include <iostream>
 
-// [r3000] Native IOP RPC delivery (defined in ps2_runtime.cpp).
-extern bool ps2xInvokeIopRpc(PS2Runtime *rt, uint32_t sid, uint32_t command, uint8_t *eeRam,
-                             uint32_t sendAddr, uint32_t sendSize, uint32_t recvAddr, uint32_t recvSize);
-
 namespace
 {
-    // Minimal ISO9660 path -> (LBN, size-bytes) resolver for the mounted CD image.
-    // Handles the game's DVCI file-resolver RPC (sid 0x80000597, cmd 0), which sends
-    // a path like "\DATA\PZS3US.DIR;1" and expects the file's absolute sector (LBN).
+    // [TWR-29] The ISO9660 resolver moved to runtime/ps2_iso9660.{h,cpp}, shared with the
+    // IOP host adapter (module loads from cdrom0:). This keeps the DVCI file-resolver RPC
+    // (sid 0x80000597, cmd 0) on the same implementation.
     bool iso9660Resolve(const std::string &imagePath, const std::string &guestPath,
                         uint32_t &lbnOut, uint32_t &sizeOut)
     {
-        std::ifstream f(imagePath, std::ios::binary);
-        if (!f.is_open()) return false;
-        auto readSector = [&](uint32_t lbn, std::vector<uint8_t> &buf) -> bool {
-            buf.resize(2048);
-            f.seekg(static_cast<std::streamoff>(lbn) * 2048);
-            f.read(reinterpret_cast<char *>(buf.data()), 2048);
-            return f.good() || f.gcount() > 0;
-        };
-        std::vector<uint8_t> sec;
-        if (!readSector(16, sec)) return false; // Primary Volume Descriptor
-        // Root directory record lives at PVD offset 156, 34 bytes.
-        const uint8_t *root = sec.data() + 156;
-        uint32_t dirLbn = *reinterpret_cast<const uint32_t *>(root + 2);
-        uint32_t dirSize = *reinterpret_cast<const uint32_t *>(root + 10);
-
-        // Split the guest path into components, dropping device/prefix, ";1" and case.
-        std::string p = guestPath;
-        for (char &c : p) { if (c == '\\') c = '/'; }
-        std::vector<std::string> comps;
-        size_t i = 0;
-        while (i < p.size())
-        {
-            while (i < p.size() && p[i] == '/') ++i;
-            size_t j = i;
-            while (j < p.size() && p[j] != '/') ++j;
-            if (j > i)
-            {
-                std::string c = p.substr(i, j - i);
-                size_t semi = c.find(';');
-                if (semi != std::string::npos) c = c.substr(0, semi);
-                std::transform(c.begin(), c.end(), c.begin(), ::toupper);
-                if (!c.empty() && c != "." && c != "HST:") comps.push_back(c);
-            }
-            i = j;
-        }
-        if (comps.empty()) return false;
-
-        for (size_t ci = 0; ci < comps.size(); ++ci)
-        {
-            const std::string &want = comps[ci];
-            const bool wantDir = (ci + 1 < comps.size());
-            bool found = false;
-            uint32_t remaining = dirSize;
-            uint32_t curLbn = dirLbn;
-            std::vector<uint8_t> dbuf;
-            while (remaining > 0 && !found)
-            {
-                if (!readSector(curLbn, dbuf)) return false;
-                uint32_t off = 0;
-                while (off < 2048)
-                {
-                    uint8_t len = dbuf[off];
-                    if (len == 0) break; // rest of sector is padding
-                    const uint8_t *rec = dbuf.data() + off;
-                    uint32_t eLbn = *reinterpret_cast<const uint32_t *>(rec + 2);
-                    uint32_t eSize = *reinterpret_cast<const uint32_t *>(rec + 10);
-                    uint8_t flags = rec[25];
-                    uint8_t nameLen = rec[32];
-                    std::string name(reinterpret_cast<const char *>(rec + 33), nameLen);
-                    size_t semi = name.find(';');
-                    if (semi != std::string::npos) name = name.substr(0, semi);
-                    std::transform(name.begin(), name.end(), name.begin(), ::toupper);
-                    if (name == want && (((flags & 2) != 0) == wantDir))
-                    {
-                        dirLbn = eLbn; dirSize = eSize;
-                        lbnOut = eLbn; sizeOut = eSize;
-                        found = true;
-                        break;
-                    }
-                    off += len;
-                }
-                if (remaining >= 2048) { remaining -= 2048; ++curLbn; }
-                else remaining = 0;
-            }
-            if (!found) return false;
-        }
-        return true;
+        return ps2_iso9660::resolve(imagePath, guestPath, lbnOut, sizeOut);
     }
 }
 
@@ -137,19 +58,6 @@ bool ps2_iop::handleRPC(PS2Runtime *runtime,
 {
     resultPtr = 0u;
     signalNowaitCompletion = false;
-
-    // [r3000] Prefer the native IOPRP file service (CDVDFSV) for the DVCI RPCs (on by default;
-    // opt out with PS2X_IOP_IOPRP=0).
-    if (const char *e = std::getenv("PS2X_IOP_IOPRP"); !(e && e[0] == '0'))
-    {
-        if ((sid == 0x80000597u || sid == 0x2000004u) &&
-            ps2xInvokeIopRpc(runtime, sid, rpcNum, m_rdram, sendBufAddr, sendSize, recvBufAddr, recvSize))
-        {
-            signalNowaitCompletion = true;
-            if (recvBufAddr) resultPtr = recvBufAddr;
-            return true;
-        }
-    }
 
     // Dragon Ball Z: Budokai Tenkaichi 3 (SLUS_214.72) DVCI disc file-resolver.
     // sid 0x80000597, cmd 0 = "find file": the guest sends a path string at
@@ -353,17 +261,6 @@ bool ps2_iop::handleRPC(PS2Runtime *runtime,
     {
         ps2cov::noteIopModule("SOUNDS", rpcNum);
         return true;
-    }
-
-    // [r3000] Deliver DBCMAN RPCs to the native module's registered handler (opt out with =0).
-    if (const char *nat = std::getenv("PS2X_IOP_NATIVE_DBCMAN"); !(nat && nat[0] == '0'))
-    {
-        if (ps2xInvokeIopRpc(runtime, sid, rpcNum, m_rdram, sendBufAddr, sendSize, recvBufAddr, recvSize))
-        {
-            signalNowaitCompletion = true;
-            if (recvBufAddr) resultPtr = recvBufAddr;
-            return true;
-        }
     }
 
     if (ps2_iop_dbcman::handleDbcManRpc(m_rdram,

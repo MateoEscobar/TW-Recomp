@@ -375,7 +375,7 @@ void InstallWizard::workerExtract()
     };
 
     // [modules] ISO path -> flat deploy path. Warriors disc layout:
-    //   MODULES/<x>  -> Modules/<x>  IOP modules (.IRX, .IMG) — resolveIopModulePath() finds them here
+    //   MODULES/<x>  -> Modules/<x>  IOP modules (.IRX, .IMG) — the ps2xIOP host adapter finds them here (see docs/iop.md)
     //   IOP/<x>      -> IOP/<x>      audio banks (BFW.SND, MUSIC.SND) — path preserved
     //   PSS/<x>      -> PSS/<x>      Bink cutscenes (.BIK) — path preserved
     //   SLUS_212.15  -> Modules/BOOT the boot ELF travels with the modules
@@ -408,7 +408,7 @@ void InstallWizard::workerExtract()
     // [modules] The install writes the FLAT layout the runtime documents (docs/DEPLOY.md), not a copy
     // of the disc tree: the AFS containers and their .idx/.ALG sidecars lose the leading "DATA/", the
     // IOP modules and the boot ELF go together in Modules/, and the boot ELF is renamed to BOOT.
-    // The runtime resolves all three shapes (see resolveIopModulePath and configureIoPathsFromElf), so
+    // The runtime resolves all three shapes (see PS2IopHostAdapter::translateGuestPath and configureIoPathsFromElf), so
     // this only decides what the user sees on disk.
     {
         const std::filesystem::path modulesDir = m_dataDir / "Modules";

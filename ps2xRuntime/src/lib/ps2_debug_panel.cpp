@@ -15,6 +15,7 @@ extern "C" const char *glfwGetJoystickName(int jid);
 #include "Kernel/Stubs/Pad.h"
 #include "runtime/pad_config.h"
 #include "runtime/ps2_iop.h"
+#include "ps2_iop_host.h"   // [TWR-29] emulated IOP host counters
 
 #if defined(__linux__)
 #include "runtime/pad_evdev_linux.h"
@@ -159,6 +160,8 @@ namespace
             {kSifRpcDebugFlagMissingClient, "bad-client"},
             {kSifRpcDebugFlagServerDispatch, "server"},
             {kSifRpcDebugFlagDtx, "dtx"},
+            {kSifRpcDebugFlagIopServer, "iop"},      // [TWR-29] served by the emulated IOP
+            {kSifRpcDebugFlagDummyServer, "dummy"},  // [TWR-29] no provider at all
         };
 
         std::string out;
@@ -934,6 +937,78 @@ namespace
     {
         uint8_t *rdram = runtime.memory().getRDRAM();
 
+        // [TWR-29] The emulated IOP (ps2xIOP): what the IRX modules are doing right now.
+        {
+            const ps2x::iop::DebugSnapshot snap = runtime.iopDebugSnapshot();
+            const PS2IopHostAdapter::Counters hc = runtime.iopHost().counters();
+            ImGui::SeparatorText("ps2xIOP (emulated IOP)");
+            ImGui::Text("cycles=%llu instructions=%llu modules=%u threads=%u rpcServers=%u",
+                        static_cast<unsigned long long>(snap.emulatorCycles),
+                        static_cast<unsigned long long>(snap.emulatorInstructions),
+                        snap.emulatorLoadedModules,
+                        snap.emulatorThreads,
+                        snap.emulatorRpcServers);
+            ImGui::Text("host: modules iso=%llu host=%llu missing=%llu | ee-rpc=%llu (fail %llu) | sif-cmd=%llu (unhandled %llu) | guest-calls=%llu (fail %llu) | audio-cmds=%llu",
+                        static_cast<unsigned long long>(hc.modulesFromIso),
+                        static_cast<unsigned long long>(hc.modulesFromHost),
+                        static_cast<unsigned long long>(hc.modulesMissing),
+                        static_cast<unsigned long long>(hc.eeRpcCalls),
+                        static_cast<unsigned long long>(hc.eeRpcFailures),
+                        static_cast<unsigned long long>(hc.sifCommands),
+                        static_cast<unsigned long long>(hc.sifCommandsUnhandled),
+                        static_cast<unsigned long long>(hc.guestInvocations),
+                        static_cast<unsigned long long>(hc.guestInvocationFailures),
+                        static_cast<unsigned long long>(hc.audioCommands));
+            if (ImGui::BeginTable("iop_services", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+            {
+                ImGui::TableSetupColumn("HLE service");
+                ImGui::TableSetupColumn("SIDs");
+                ImGui::TableSetupColumn("Active");
+                ImGui::TableSetupColumn("Metrics");
+                ImGui::TableHeadersRow();
+                for (const ps2x::iop::DebugService &service : snap.services)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(service.name.c_str());
+                    ImGui::TableNextColumn();
+                    std::string sids;
+                    for (const uint32_t sid : service.sids)
+                    {
+                        char buf[16];
+                        std::snprintf(buf, sizeof(buf), "%s0x%08X", sids.empty() ? "" : " ", sid);
+                        sids += buf;
+                    }
+                    ImGui::TextUnformatted(sids.c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%s", service.active ? "yes" : "no");
+                    ImGui::TableNextColumn();
+                    std::string metrics;
+                    for (const ps2x::iop::DebugMetric &metric : service.metrics)
+                    {
+                        char buf[96];
+                        if (metric.hexadecimal)
+                            std::snprintf(buf, sizeof(buf), "%s%s=0x%llx", metrics.empty() ? "" : " ", metric.name.c_str(),
+                                          static_cast<unsigned long long>(metric.value));
+                        else
+                            std::snprintf(buf, sizeof(buf), "%s%s=%llu", metrics.empty() ? "" : " ", metric.name.c_str(),
+                                          static_cast<unsigned long long>(metric.value));
+                        metrics += buf;
+                    }
+                    ImGui::TextUnformatted(metrics.c_str());
+                }
+                ImGui::EndTable();
+            }
+            if (!snap.diagnostics.empty())
+            {
+                ImGui::TextDisabled("Diagnostics (%zu):", snap.diagnostics.size());
+                for (const std::string &line : snap.diagnostics)
+                {
+                    ImGui::BulletText("%s", line.c_str());
+                }
+            }
+        }
+
         struct ModuleRow
         {
             int32_t id = 0;
@@ -969,6 +1044,7 @@ namespace
         {
             uint32_t sid = 0;
             uint32_t sdPtr = 0;
+            bool iopBacked = false;   // [TWR-29] served by an IRX on the emulated IOP
             bool readable = false;
             t_SifRpcServerData sd{};
         };
@@ -1006,6 +1082,7 @@ namespace
                 RpcServerRow row{};
                 row.sid = sid;
                 row.sdPtr = state.sd_ptr;
+                row.iopBacked = state.iopBacked;
                 row.readable = readGuestObjectNoThrow(rdram, state.sd_ptr, row.sd);
                 servers.push_back(row);
             }
@@ -1139,10 +1216,11 @@ namespace
                     rpcServerIndex,
                     rpcActiveQueue);
 
-        if (ImGui::BeginTable("rpc_servers", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 180)))
+        if (ImGui::BeginTable("rpc_servers", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 180)))
         {
             ImGui::TableSetupColumn("SID");
             ImGui::TableSetupColumn("Name");
+            ImGui::TableSetupColumn("IOP");
             ImGui::TableSetupColumn("sd*");
             ImGui::TableSetupColumn("func");
             ImGui::TableSetupColumn("buf");
@@ -1159,6 +1237,8 @@ namespace
                 ImGui::Text("0x%08X", row.sid);
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(iopRpcSidName(row.sid));
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", row.iopBacked ? "yes" : "-");
                 ImGui::TableNextColumn();
                 ImGui::Text("0x%08X", row.sdPtr);
                 ImGui::TableNextColumn();

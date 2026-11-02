@@ -337,6 +337,10 @@ struct RpcServerState
 {
     uint32_t sid = 0;
     uint32_t sd_ptr = 0; // PS2 address
+    // [TWR-29] The SID is served by a server registered on the emulated IOP (ps2xIOP): the
+    // descriptor in guest RAM is a handle, not an EE server (func == 0), and SifCallRpc routes
+    // the call to the IOP before any EE-side HLE.
+    bool iopBacked = false;
 };
 
 struct RpcClientState
@@ -377,6 +381,8 @@ static constexpr uint32_t kSifRpcDebugFlagCallback = 1u << 2;
 static constexpr uint32_t kSifRpcDebugFlagMissingClient = 1u << 3;
 static constexpr uint32_t kSifRpcDebugFlagServerDispatch = 1u << 4;
 static constexpr uint32_t kSifRpcDebugFlagDtx = 1u << 5;
+static constexpr uint32_t kSifRpcDebugFlagIopServer = 1u << 6;   // [TWR-29] served by the emulated IOP
+static constexpr uint32_t kSifRpcDebugFlagDummyServer = 1u << 7; // [TWR-29] no provider: placeholder descriptor
 
 struct SoundDriverRpcState
 {
