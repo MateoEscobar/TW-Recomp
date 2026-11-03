@@ -54,7 +54,8 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Resuelto** (3c) | SIF/IOP (b): el handler RPC de MultiStream enlaza el servidor EE `0x12344321` en un bucle sin tope; el EE lo registra desde otro hilo, que nunca corría porque el hilo llamador retenía el token del planificador durante toda la RPC síncrona → el handler se abortaba a los 2 M instrucciones de `ps2xIOP` y MultiStream quedaba sin canal de callbacks IOP→EE (ver detalle) | Hook `IopHost::awaitGuestRpcServer` en `ps2xIOP` (fork) + `PS2Runtime::yieldToOtherGuestThreads` en el adapter |
 | 3c-bis | Con el canal IOP→EE vivo el juego arranca el render: *core dump* por recursión infinita `Store32` → `drainCompletedDmacHandlers` → handler DMAC `sub_0048B708` → `Store32`… | **Resuelto** (3c) | Runtime EE (a): los handlers DMAC se despachaban reentrantes desde el `Store32` que lanza el siguiente DMA, y además reutilizaban la misma pila asíncrona del handler interrumpido. En el EE un handler corre con las interrupciones enmascaradas | `drainCompletedDmacHandlers` no reentra: las completaciones que llegan durante un handler quedan en cola y las entrega el drenaje exterior al volver |
 | 4 | **Primer `flips=1`**. Hilo principal en la espera de flush DMA de RenderWare (`sub_0048C508`, `pc=0x48c5f0`, `ra=0x48c628`): `[gp-0x7600]=0x7acc18 ≠ [gp-0x75FC]=0x7acc10`, contador de completaciones pendientes `[gp-0x7608]=1` | **Resuelto** (sesión 5) | Runtime EE (a) + GS/VIF (d), tres huecos encadenados: (4a) completaciones DMAC entregadas dentro de una sección `di` y desde otro hilo host mientras corría un handler → la cola de paquetes de RW se pasaba del final; (4b) `GIF_STAT` sin modelar y escrituras a `VIF1_FIFO` ignoradas → el paquete `0x21` esperaba `M3P` para siempre en el hilo de vblank; (4c) un kick de cadena vacía no levantaba la interrupción DMAC → `cnt=1` perpetuo | (4a) enmascarado EE: `Status.EIE` por contexto (hilos arrancan con EIE=1, handlers con EXL), entrega diferida en el despachador/tras el handler, profundidad de interrupción y drenaje globales; (4b) `VIF0/VIF1_FIFO` → intérprete VIF (vía worker asíncrono) y `GIF_STAT` con `M3R/M3P/IMT/PSE/FQC` como upstream; (4c) todo canal iniciado con `STR` completa aunque no traiga datos |
-| 5 | ~30 flips/s y `prims/sec≈180` durante 20–50 s (varía por ejecución); después cae a ~1 flip/s, otra vez en `pc=0x48c5f0` con otra cadena (`0x48e118 ← 0x48fd28 ← 0x482814* ← 0x198b4c ← 0x19596c* …`). La ventana se ve en negro en `xwd` (sin confirmar si es la captura o el render) | **Abierto** | Sin diagnosticar | — |
+| 5 | Pantalla negra de verdad con ~30 flips/s: el juego pasa la memcard y entra en carga; el IOP lee ~19 MB del WAD en ~10 s y luego nada, mientras MultiStream sondea sin fin el NAX de las voces SPU2 | **Resuelto** (sesión 7) | SIF/IOP (b): `ps2xIOP` no emulaba el SPU2; MultiStream sondea el NAX de sus voces para saber cuánto consumió de cada anillo y pedir más datos, y NAX valía siempre 0 | SPU2 fase 1 portado de god-of-war-recomp al fork `ps2xIOP` (`feature/TWR-27-spu2-phase1` `115cf21`), avanzado también dentro de `runCpu` (sondeo desde RPC síncronas) |
+| 6 | Con el SPU2 la música se transmite (2 voces, `IOP/MUSIC.SND`, DMA ~115 KB/s) pero la pantalla sigue negra: `prims/sec≈180`, `Mpix/sec=0`. El WAD deja de leerse a los ~15 s; el hilo principal alterna `0x154EE0` (gestor de carga) y `0x48c5f0` (flush DMA de RW). La caída a ~1 flip/s en `0x48c5f0` aparece según el tiempo (con `strace`, o tras ~40 s), con y sin SPU2 | **Abierto** | Sin diagnosticar. Dos frentes: (a) qué espera el gestor de carga tras el último bloque del WAD; (b) carrera en la espera de flush de RW (`0x48e118 ← 0x48fd28 ← 0x482814*`) | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -208,13 +209,34 @@ EE espera la carga para siempre.
 **Clasificación (ADR D4/D5).** Subsistema (b) SIF/IOP, motivo **SPU2 ausente**. Es el punto de
 parada D5: hace falta un modelo mínimo de voces SPU2 (KON/KOFF, avance de NAX por bloques ADPCM
 según el pitch, flags de loop/end, ENDX e IRQ de dirección), sin mezcla ni salida de audio. Se
-construye en el fork `ps2xIOP` y TWR-30 lo extiende. **Pendiente de decisión del dev.**
+construye en el fork `ps2xIOP` y TWR-30 lo extiende. **Decidido por el dev (sesión 6) y hecho en la sesión 7:** ver "Detalle del bloqueo 5 — resolución".
 
 **Bug lateral corregido (fork `326683a`).** `ps2xIOP` cortaba **sin aviso** toda llamada
 síncrona al guest a los 2 M de instrucciones. El registro de SFX de MultiStream (handler RPC
 `0x275c0` → `GetSFXSlot` `0x2d0b4` → búsqueda en `0x2d020` sobre 512 SpotFX, O(n²)) lo
 superaba y quedaba a medias. Ahora el tope es 128 M (~3,5 s de IOP real) y llegar a él se
 registra como error `[IOP] guest call … cut after …`. Hay test (handler de ~9 M instrucciones).
+
+### Detalle del bloqueo 5 — resolución (sesión 7)
+
+Comparados los tres repos (TW, BT3, GoW): ni upstream PS2Recomp ni BT3-Recomp emulan el SPU2 para
+un `LIBSD.IRX` real. god-of-war-recomp sí (GPLv3, igual que el fork): `patches/anteriores/`
+`ps2recomp-spu2.patch` (núcleo), `-spu2-output` (salida con mutex, `drainAudio`), `-spu2-perf`
+(contadores) y `-spu2-nax` (NAX dentro del bloque que suena, como `NextA` de PCSX2; sin eso un
+stream sondeado ve NAX fuera de su anillo y se aborta). Se portaron los cuatro en ese orden al fork
+(`ps2xIOP/src/emulator/core/spu2.{h,cpp}`), con las variables renombradas a `PS2X_SPU2_PERF` y
+`PS2X_SPU2_IRQ`. No se portó la parte de salida de audio de GoW (raylib): el audio audible es TWR-30.
+`ps2recomp-iop-sound.patch` no aplica todavía: `sceSifGetOtherData` (sifcmd 23) no lo importa
+`IOP.IRX`, y el `WaitSema` sin hilo actual no se ha observado; se revisa si aparece.
+
+**Diferencia con GoW:** además de en `runCycles`, el SPU2 avanza dentro de `runCpu`. Una RPC
+síncrona del EE corre en `callFunction`, donde `runCycles` no está en la pila: si el IRX sondea NAX
+ahí, sin esto el tiempo del SPU2 no pasa. Hay test que falla sin ese cambio.
+
+**Verificación.** `ctest` de `ps2xIOP` 5/5 (nuevo `ps2_iop_spu2_tests`, 13 casos; el hash de
+referencia de GoW coincide). En el juego: 2 voces activas sostenidas, DMA al SPU2 ~115 KB/s,
+`IOP/MUSIC.SND` leído durante toda la corrida (antes no se abría) y 70 s a ~30 flips/s. La pantalla
+sigue negra: ver bloqueo 6.
 
 ### Defaults de render heredados de BT3 — retirados (sesión 7)
 
