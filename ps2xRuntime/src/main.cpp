@@ -572,13 +572,16 @@ int main(int argc, char *argv[])
     setupTerminateLogger();
     ps2xFiberSelfTest();   // [fibers] PS2X_FIBERTEST=1: prove the primitive on this toolchain
 
-    // ---- Warriors defaults ----------------------------------------------------------
-    // The validated playing configuration (GPU path + outline/ink chain + graded DoF
-    // + the barrier-elimination serving + grass anti-swim) used to require ~25 env
-    // vars; a bare run gave the stripped software renderer. Bake them in as DEFAULTS:
-    // setenv(..., 0) never overwrites, so every PS2X_* override still works exactly
-    // as before (including =0 to disable a single flag).
-    // PS2X_NODEFAULTS=1 skips the whole block (bare engine, for debugging).
+    // ---- Runtime defaults ------------------------------------------------------------
+    // Only runtime behaviour that The Warriors is verified to need is defaulted here. The
+    // ~30 render/skip flags this block used to bake in (GPU path, SCENESKIP, F336SKIP,
+    // SHCOMPSKIP with BT3 shader indices, ASYNC_KICK with known races, CDTICK, FORCE_MC...)
+    // were validated for Budokai Tenkaichi 3, not for this game, and were retired in TWR-27
+    // (upstream PS2Recomp and god-of-war-recomp default none of them). Every PS2X_* flag is
+    // still opt-in from the environment; the GPU path (PS2X_GPU=1) stays opt-in until it is
+    // validated against Warriors' real rendering.
+    // setenv(..., 0) semantics: def() never overwrites a user value (=0 still disables).
+    // PS2X_NODEFAULTS=1 skips the block (bare engine, for debugging).
     if (!std::getenv("PS2X_NODEFAULTS"))
     {
         // Track which vars WE defaulted (vs user-set): consumers that must respect an
@@ -586,40 +589,10 @@ int main(int argc, char *argv[])
         static std::string s_defaulted = ",";
         auto def = [](const char *n, const char *v)
         { if (!std::getenv(n)) { s_defaulted += n; s_defaulted += ','; setenv(n, v, 1); } };
-        def("PS2X_GPU", "1"); def("PS2X_GPU_DEPTH", "1"); def("PS2X_ZSCALE", "256");
-        def("PS2X_TEXAKEY", "1"); def("PS2X_BARGATE", "1"); def("PS2X_NOSHCOMP", "1");
-        def("PS2X_FLUSHCT32", "1"); def("PS2X_ALPHA128", "1"); def("PS2X_DUALSRC", "1");
-        def("PS2X_ASPLIT", "1"); def("PS2X_FBODIRTY", "1"); def("PS2X_BARRIER", "1");
-        def("PS2X_AFLUSH", "1"); def("PS2X_CT32ALPHA", "1"); def("PS2X_EDGEWRAP", "1");
-        def("PS2X_TEXCACHEMB", "64"); def("PS2X_BARBLOCK", "1");
-        def("PS2X_GPUALIAS", "4"); def("PS2X_DOFMASK", "2"); def("PS2X_DOFZFAR", "200000");
-        def("PS2X_ALPHAONLYFBO", "1"); def("PS2X_SCENESKIP", "1"); def("PS2X_F336SKIP", "1");
-        def("PS2X_IDXRT", "1"); def("PS2X_IDXONLY", "1"); def("PS2X_MASKBUILDSKIP", "1");
-        def("PS2X_P8TWIN", "1"); def("PS2X_SHCOMPSKIP", "15972,16012,16004,16008,16016,16020,16024");
-        def("PS2X_Warriors_CDTICK", "1"); def("PS2X_SCHED", "1"); def("PS2X_FORCE_MC", "1");
-        // [asyncdefault] ON by user decision 2026-09-07. The old reason for holding it back --
-        // "better averages but 80-157 ms hitch frames" -- no longer applies: [asyncpace] fixed the
-        // fast-forward (readIORegister was clearing CHCR.STR while the worker still had the channel,
-        // so the guest saw every DMA complete instantly) and [framegate] fixed the pacing. Measured
-        // on an i5-12400: 1P 22.7 -> 29.9 fps, splitscreen 16.8 -> 22.6, guest 19.77 -> 3.33 ms.
-        //
-        // ⚠ STILL OWED, and the reason this was held back until now: the async races are not
-        // cleaned up -- guest GS-priv-reg writes vs the worker, VIF1 register writes, the SW-mode
-        // latch -- and no corruption soak has been run. Two user access-violation crash reports
-        // exist (2026-09-07, see [[runtime-threading-race]]); one had async on, one had it off, so
-        // async is not the sole cause, but it is the one subsystem with known-unresolved races.
-        // PS2X_ASYNC_KICK=0 opts out (def() never overwrites an explicit value).
-        def("PS2X_ASYNC_KICK", "1");
-        // [reveal-hidden-entry] The game hides its 5th main-menu plate ("Network Battle", the
-        // network entry) by hardcoding the skip index to 4 (0x335568). The overlay patch disables
-        // that skip when this is set, so the entry renders (equivalent to the PCSX2 cheat
-        // 00335568 000000FF).
-        // NOT defaulted any more: the Dragon Net Menu entry is retired (docs/NEW-NETMENU.md), and
-        // revealing a plate that leads nowhere is worse than the stock menu. Set
-        // PS2X_REVEAL_HIDDEN_MENU_ENTRY=1 by hand to bring the plate back.
-        def("PS2X_REVEAL_HIDDEN_MENU_ENTRY", "0");
+        // Cooperative EE scheduler: guest threads hand the token over on blocking syscalls,
+        // which the IOP<->EE RPC path relies on (IopHost::awaitGuestRpcServer, TWR-27).
+        def("PS2X_SCHED", "1");
         setenv("PS2X_DEFAULTED", s_defaulted.c_str(), 1);
-        // Deliberately NOT defaulted: PS2X_BARSTAT (diagnostic spam), PS2X_TIMERMULT.
     }
 
     try

@@ -216,13 +216,23 @@ síncrona al guest a los 2 M de instrucciones. El registro de SFX de MultiStream
 superaba y quedaba a medias. Ahora el tope es 128 M (~3,5 s de IOP real) y llegar a él se
 registra como error `[IOP] guest call … cut after …`. Hay test (handler de ~9 M instrucciones).
 
-### Defaults de render heredados de BT3 (`main.cpp`, sin `PS2X_NODEFAULTS`)
+### Defaults de render heredados de BT3 — retirados (sesión 7)
 
-`main.cpp` activa por defecto unas 30 variables "validadas" para BT3: `PS2X_SCENESKIP`,
-`F336SKIP`, `SHCOMPSKIP` (índices de shaders de BT3), `MASKBUILDSKIP`, `BARGATE`, `IDXONLY`…,
-`PS2X_Warriors_CDTICK` y `PS2X_ASYNC_KICK=1`. Según su propio comentario, este último tiene
-carreras sin resolver. Ninguno está verificado contra Warriors. Para diagnosticar, arrancar
-con `PS2X_NODEFAULTS=1 PS2X_SCHED=1`. Retirarlos está pendiente de decisión del dev.
+`main.cpp` activaba por defecto unas 30 variables "validadas" para BT3: `PS2X_GPU`,
+`PS2X_SCENESKIP`, `F336SKIP`, `SHCOMPSKIP` (índices de shaders de BT3), `MASKBUILDSKIP`,
+`BARGATE`, `IDXONLY`…, `PS2X_Warriors_CDTICK`, `PS2X_FORCE_MC` y `PS2X_ASYNC_KICK=1` (con
+carreras sin resolver según su propio comentario). Ninguna estaba verificada contra Warriors, y ni
+upstream PS2Recomp ni god-of-war-recomp ponen defaults así. **Decisión del dev (15): retirarlas.**
+Ahora solo se pone por defecto `PS2X_SCHED=1`, que la cesión de token de las RPC IOP→EE necesita.
+Todo lo demás es opt-in desde el entorno. El camino GPU (`PS2X_GPU=1`) sigue opt-in hasta
+validarlo contra el render real de Warriors. `PS2X_NODEFAULTS=1` sigue quitando también
+`PS2X_SCHED`.
+
+**Corrección del diagnóstico de la sesión 6:** la caída a ~1 flip/s **no** la causaban estos
+defaults. Sin ellos también aparece: 30 flips/s hasta ~40 s y después ~1 flip/s, con el hilo
+principal en `0x48c5f0` (misma cadena `0x48e118 ← 0x48fd28 ← 0x482814*`). La muestra de 4
+corridas de la sesión 6 era corta (las corridas duraban menos que el tiempo hasta la caída).
+Sigue abierta como síntoma secundario del bloqueo 5; se revisa después del SPU2.
 
 ### Herramientas de esta sesión
 
