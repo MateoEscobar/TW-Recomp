@@ -29,6 +29,9 @@ PS2X_CD_IMAGE="<ruta al ISO>" ./build/ps2xRuntime/ps2EntryRunner games/warriors/
    - `PS2X_STEPCENSUS=<out.csv>` (agrupa por frame lógico; hoy su enganche por frame dependía de la
      capa BT3 retirada, ver Inventario).
    Los cuatro se activan para cualquier ELF desde `PS2Runtime::initialize()` (`ps2_diag_env.cpp`).
+   - `[stallprobe]` (siempre activo) imprime, a la 2000.ª repetición del mismo PC, un **backtrace
+     heurístico** del hilo: palabras de `[sp, sp+0x800)` que apuntan a código y siguen a un `jal`
+     (`*` = `jalr`). Mapear cada dirección a su `ps2xRuntime/src/runner/sub_*` da la cadena real.
 2. **Clasificar la causa** en el subsistema del productor: (a) runtime EE (hilos, semáforos,
    alarmas, interrupciones, DMA), (b) SIF/IOP (`ps2xIOP`, host adapter), (c) CD, (d) GS/VIF/VU,
    (e) input.
@@ -41,7 +44,35 @@ PS2X_CD_IMAGE="<ruta al ISO>" ./build/ps2xRuntime/ps2EntryRunner games/warriors/
 | # | Síntoma | Estado | Causa | Corrección |
 |---|---|---|---|---|
 | 1 | Hilo principal en `0x154b50` (`sub_00154AE0`, `ra=0x154d1c`) x200 000 | **Desaparece** al desregistrar la capa BT3 (commit `55da112b`) | Pendiente de aislar qué override BT3 lo producía (bisección de los 12 registros retirados, sub-fase 3b) | Retiro de la capa BT3 |
-| 2 | Hilo principal en `0x47dd70` (`ra=0x47dd90`, `a1=a2=0x2000010`), `flips=0` | **Abierto** (3b) | — | — |
+| 2 | Hilo principal en `0x47dd70` (`ra=0x47dd90`, `a1=a2=0x2000010`), `flips=0` | **Resuelto** (3b) | Runtime EE (a): `SetupHeap` recortaba el heap del kernel a `0x01F00000`; el juego pide `0x715b60..0x1FF0004` y reserva toda la RAM libre con un `malloc` (ver detalle) | Mapa de memoria `[hiarena]` (`ps2_memory.h`) + `SetupHeap`/`EndOfHeap` con semántica de kernel |
+| 3 | Bucle de frame en `0x148D10` con `sceGsSyncV` (~60/s), `flips=0`, `prims/sec=0` | **Abierto** (3b/3c) | — | — |
+
+### Detalle del bloqueo 2 — heap del kernel recortado
+
+Cadena real (backtrace de `[stallprobe]`): `crt0 0x1001c0` → `0x443670` → `0x144764` → `0x160e2c` →
+`0x145820` → `0x17a210` → `0x194df0` → init RenderWare en `sub_00194558` (`0x194b18`) →
+`RwEngineTerm` (`0x4836d0`) → `0x47e0f4` → `sub_0047DD28(NULL)`.
+
+1. `sub_00148828` (plataforma) calcula `size = 0x1FFF000 − (_end 0x715b5c + 0x11000) − 0x810 =
+   0x18d7c94` y llama `malloc(size)` (newlib real, `0x433B60`): el juego toma **toda** la RAM libre
+   hasta su pila para su propio gestor de heaps.
+2. `SetupHeap(0x715b5c, 0x18da4a4)` pedía fin `0x1FF0004`, pero el runtime lo recortaba a
+   `kDefaultGuestHeapEnd = 0x01F00000` (las pools RPC/TLS, las pilas de callbacks y el heap HLE del
+   runtime vivían en `0x01F00000+`). `sbrk` no tenía sitio → `malloc` devolvía 0.
+3. Sin arena, el heap de arranque del juego (objeto en pila, vtable `0x544370`) devuelve 0 → el gestor
+   (`0x6eb958`, `PushHeap` `0x3395b8`) apila heaps NULL → el `malloc` de RenderWare (`0x192908` →
+   `0x339a20`) devuelve basura/0 → `RwFreeListAlloc` del registro de plugins (`0x70acc8`, `blockList =
+   {1,1}`) falla → `RwEngineInit` (`0x483530`) sale con `498630 = 0` → `RwEngineOpen`/`RwEngineStart`
+   fallan → la ruta de error llama `RwEngineTerm`, que destruye el "objeto actual" `[gp-0x7A24] = NULL`
+   y vacía una lista en `0x10` cuyo nodo `0x2000010` se apunta a sí mismo → bucle infinito.
+
+Corrección (runtime, sin tocar el juego): con RAM de respaldo > 32 MB (`PS2X_RAM_MB=128`, por defecto)
+las reservas propias del runtime pasan **encima** de los 32 MB nativos (`[hiarena]`: pools RPC/TLS/boot
+en `0x2000000`, pilas async `0x2040000..0x2100000`, heap HLE `0x2100000..`) y `SetupHeap`/`EndOfHeap`
+devuelven el heap del kernel tal como lo pide el juego (`[start, start+size)`, o hasta la pila principal
+con `size = −1`), acotado a 32 MB. Con 32 MB de respaldo se conserva el layout anterior. Resultado:
+`[SetupHeap] kernel heap 0x715b60..0x1ff0004`, `RwEngineInit/Open/Start` devuelven 1 y el hilo
+principal llega al bucle de frame (bloqueo 3).
 
 ## Capa BT3 retirada en TWR-27
 

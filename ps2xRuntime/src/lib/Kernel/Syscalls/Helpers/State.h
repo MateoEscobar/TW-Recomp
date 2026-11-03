@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "runtime/ps2_memory.h"   // [hiarena] PS2_RUNTIME_POOL_BASE
 
 inline std::unordered_map<int, FILE *> g_fileDescriptors;
 inline int g_nextFd = 3; // Start after stdin, stdout, stderr
@@ -580,20 +581,20 @@ inline std::filesystem::path g_cdrom_cwd;
 inline std::string g_ps2_cwd_device = "host0";
 
 static constexpr uint32_t kRpcPacketSize = 64;
-static constexpr uint32_t kRpcPacketPoolBase = 0x01F00000;
+static constexpr uint32_t kRpcPacketPoolBase = PS2_RUNTIME_POOL_BASE + 0x00000u;   // [hiarena] see ps2_memory.h
 static constexpr uint32_t kRpcPacketPoolBytes = 0x00010000;
 static constexpr uint32_t kRpcPacketPoolCount = kRpcPacketPoolBytes / kRpcPacketSize;
-static constexpr uint32_t kRpcServerPoolBase = 0x01F10000;
+static constexpr uint32_t kRpcServerPoolBase = PS2_RUNTIME_POOL_BASE + 0x10000u;   // [hiarena]
 static constexpr uint32_t kRpcServerPoolBytes = 0x00010000;
 static constexpr uint32_t kRpcServerStride = 0x80;
 static constexpr uint32_t kRpcServerPoolCount = kRpcServerPoolBytes / kRpcServerStride;
 
-static constexpr uint32_t kTlsPoolBase = 0x01F20000;
+static constexpr uint32_t kTlsPoolBase = PS2_RUNTIME_POOL_BASE + 0x20000u;   // [hiarena]
 static constexpr uint32_t kTlsPoolBytes = 0x00010000;
 static constexpr uint32_t kTlsBlockSize = 0x100;
 static constexpr uint32_t kTlsPoolCount = kTlsPoolBytes / kTlsBlockSize;
 
-static constexpr uint32_t kBootModePoolBase = 0x01F30000;
+static constexpr uint32_t kBootModePoolBase = PS2_RUNTIME_POOL_BASE + 0x30000u;   // [hiarena]
 static constexpr uint32_t kBootModePoolBytes = 0x00001000;
 
 static constexpr uint32_t kSifRpcModeNowait = 0x01;

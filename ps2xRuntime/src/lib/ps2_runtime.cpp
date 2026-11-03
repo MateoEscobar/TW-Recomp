@@ -788,7 +788,7 @@ namespace
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
-    constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+    constexpr uint32_t kGuestHeapHardLimit = PS2_RUNTIME_HEAP_LIMIT;   // [hiarena] runtime HLE heap ceiling (ps2_memory.h)
     // The main thread's stack starts at PS2_RAM_SIZE-0x10 and grows DOWN. The async callback stack
     // allocator used to start its bump pointer at PS2_RAM_SIZE as well, so the very first
     // reserveAsyncCallbackStack() handed a callback the same top-of-RAM address the main thread was
@@ -1377,13 +1377,18 @@ PS2Runtime::PS2Runtime()
 
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
-    m_guestHeapBase = kGuestHeapDefaultBase;
-    m_guestHeapEnd = kGuestHeapDefaultBase;
+    {   // [hiarena] with a high arena the runtime HLE heap starts above the native RAM, never after the ELF
+        const uint32_t heapBase = PS2_RUNTIME_HIGH_ARENA ? PS2_RUNTIME_HEAP_BASE : kGuestHeapDefaultBase;
+        m_guestHeapBase = heapBase;
+        m_guestHeapEnd = heapBase;
+        m_guestHeapSuggestedBase = heapBase;
+    }
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_asyncCallbackStackTop = PS2_RAM_NATIVE_SIZE - kMainThreadStackReserve;   // [ram128] the kernel stack sits at the native top
+    m_kernelHeapBase = 0u;
+    m_kernelHeapEnd = 0u;
+    m_asyncCallbackStackFloor = PS2_RUNTIME_HIGH_ARENA ? PS2_RUNTIME_ASYNC_STACK_FLOOR : std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_asyncCallbackStackTop = PS2_RUNTIME_ASYNC_STACK_TOP;   // [ram128]/[hiarena] legacy: below the main stack at the native top
 }
 
 double g_fpPresent = 0, g_fpBar = 0, g_fpPre = 0, g_fpWait = 0, g_fpLoop = 0; int g_fpN = 0;   // [frameprof]
@@ -2036,7 +2041,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     const uint32_t suggestedHeapBase = alignGuestHeapValue(paddedEnd, kGuestHeapDefaultAlignment);
     {
         std::lock_guard<std::mutex> lock(m_guestHeapMutex);
-        if (!m_guestHeapConfigured)
+        if (!m_guestHeapConfigured && !PS2_RUNTIME_HIGH_ARENA)   // [hiarena] high arena: the HLE heap never follows the ELF
         {
             const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
             m_guestHeapSuggestedBase = std::min(suggestedHeapBase, hardLimit);
@@ -2048,8 +2053,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = PS2_RAM_NATIVE_SIZE - kMainThreadStackReserve;   // [ram128] the kernel stack sits at the native top
+        m_asyncCallbackStackFloor = PS2_RUNTIME_HIGH_ARENA ? PS2_RUNTIME_ASYNC_STACK_FLOOR
+                                                           : std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+        m_asyncCallbackStackTop = PS2_RUNTIME_ASYNC_STACK_TOP;   // [ram128]/[hiarena]
     }
 
     LoadedModule module;
@@ -3227,6 +3233,10 @@ uint32_t PS2Runtime::clampGuestHeapBase(uint32_t guestBase) const
         normalized &= PS2_RAM_MASK;
     }
     const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    if (PS2_RUNTIME_HIGH_ARENA && normalized < PS2_RUNTIME_HEAP_BASE)
+    {
+        normalized = PS2_RUNTIME_HEAP_BASE;   // [hiarena] the native RAM belongs to the game's kernel heap
+    }
     return std::min(normalized, hardLimit);
 }
 
@@ -3577,6 +3587,19 @@ uint32_t PS2Runtime::guestHeapLimit() const
 {
     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
+}
+
+void PS2Runtime::setKernelHeap(uint32_t base, uint32_t end)
+{
+    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+    m_kernelHeapBase = base;
+    m_kernelHeapEnd = end;
+}
+
+uint32_t PS2Runtime::kernelHeapEnd() const
+{
+    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+    return m_kernelHeapEnd;
 }
 
 uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)

@@ -38,6 +38,21 @@ constexpr uint32_t PS2_RAM_SIZE = static_cast<uint32_t>(PS2X_RAM_MB) * 1024u * 1
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // fast-path mask (backing size, a power of two)
 static_assert(PS2_RAM_SIZE >= PS2_RAM_NATIVE_SIZE && (PS2_RAM_SIZE & (PS2_RAM_SIZE - 1u)) == 0u,
               "PS2X_RAM_MB must be a power of two >= 32");
+
+// [hiarena] Guest memory the RUNTIME owns (HLE heap behind guestMalloc, async callback stacks, RPC
+// packet/server pools) must not overlap the RAM the retail kernel gives the game. On hardware
+// SetupHeap/EndOfHeap hand the game everything from its _end up to the main thread stack, and The
+// Warriors takes all of it with a single malloc (TWR-27: with the heap capped at 0x01F00000 that malloc
+// failed, RwEngineInit ran out of memory and RwEngineTerm spun at 0x47dd70). When the backing store is
+// larger than the native 32 MB the runtime's pools live above it; with a 32 MB backing store the
+// legacy layout (pools at 0x01F00000..0x01FC0000, heap capped there) is kept.
+constexpr bool PS2_RUNTIME_HIGH_ARENA = PS2_RAM_SIZE > PS2_RAM_NATIVE_SIZE;
+// Pools block (RPC packets, RPC servers, TLS, boot mode): 4 x 64 KB at PS2_RUNTIME_POOL_BASE.
+constexpr uint32_t PS2_RUNTIME_POOL_BASE = PS2_RUNTIME_HIGH_ARENA ? PS2_RAM_NATIVE_SIZE : 0x01F00000u;
+constexpr uint32_t PS2_RUNTIME_ASYNC_STACK_FLOOR = PS2_RUNTIME_HIGH_ARENA ? PS2_RAM_NATIVE_SIZE + 0x00040000u : 0x01F00000u;
+constexpr uint32_t PS2_RUNTIME_ASYNC_STACK_TOP = PS2_RUNTIME_HIGH_ARENA ? PS2_RAM_NATIVE_SIZE + 0x00100000u : PS2_RAM_NATIVE_SIZE - 0x00040000u;
+constexpr uint32_t PS2_RUNTIME_HEAP_BASE = PS2_RUNTIME_HIGH_ARENA ? PS2_RAM_NATIVE_SIZE + 0x00100000u : 0u;   // 0 = after the ELF
+constexpr uint32_t PS2_RUNTIME_HEAP_LIMIT = PS2_RUNTIME_HIGH_ARENA ? PS2_RAM_SIZE : 0x01F00000u;
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
 constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;

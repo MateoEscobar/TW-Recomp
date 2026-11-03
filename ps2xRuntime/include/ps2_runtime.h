@@ -589,6 +589,10 @@ public:
     uint32_t guestHeapBase() const;
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
+    // [hiarena] the retail kernel's heap (SetupHeap/EndOfHeap): game-owned, inside the native 32 MB.
+    // Separate from the runtime HLE heap above (guestMalloc) when PS2_RUNTIME_HIGH_ARENA.
+    void setKernelHeap(uint32_t base, uint32_t end);
+    uint32_t kernelHeapEnd() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
     void drainCompletedDmacHandlers(uint8_t *rdram);
@@ -805,6 +809,8 @@ private:
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
+    uint32_t m_kernelHeapBase = 0u;   // [hiarena]
+    uint32_t m_kernelHeapEnd = 0u;
     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
 

@@ -655,6 +655,9 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
+    // [hiarena] bottom of the main thread stack set by SetupThread (0 = not set yet)
+    static uint32_t g_kernelMainStackBottom = 0u;
+
     // 0x3C SetupThread
     // args: $a0 = gp, $a1 = stack, $a2 = stack_size, $a3 = args, $t0 = root_func
     void SetupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -702,6 +705,10 @@ namespace ps2_syscalls
         }
 
         sp &= ~0xFu;
+        {   // [hiarena] SetupHeap(start, -1) ends the heap where this stack begins, as the kernel does
+            const uint32_t stackSize = (stackSizeSigned > 0) ? static_cast<uint32_t>(stackSizeSigned) : 0u;
+            g_kernelMainStackBottom = (sp > stackSize) ? (sp - stackSize) : sp;
+        }
         setReturnU32(ctx, sp);
     }
 
@@ -712,6 +719,26 @@ namespace ps2_syscalls
         const uint32_t heapSize = getRegU32(ctx, 5);    // $a1 (optional size)
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
+
+        if (PS2_RUNTIME_HIGH_ARENA && runtime)
+        {   // [hiarena] retail kernel: the heap is [start, start+size), or up to the main thread stack for
+            // size -1/0, inside the native RAM. The runtime's own HLE heap lives above it and is untouched.
+            uint64_t end = (g_kernelMainStackBottom != 0u) ? g_kernelMainStackBottom : (PS2_RAM_NATIVE_SIZE - 0x40000u);
+            if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
+            {
+                end = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
+            }
+            end = std::min<uint64_t>(end, PS2_RAM_NATIVE_SIZE);
+            if (end <= heapBase)
+            {
+                end = heapBase;
+            }
+            runtime->setKernelHeap(heapBase, static_cast<uint32_t>(end));
+            std::fprintf(stderr, "[SetupHeap] kernel heap 0x%x..0x%x (%u KB) size_arg=0x%x\n",
+                         heapBase, static_cast<uint32_t>(end), static_cast<uint32_t>((end - heapBase) >> 10), heapSize);
+            setReturnU32(ctx, heapBase);
+            return;
+        }
 
         // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
@@ -756,9 +783,13 @@ namespace ps2_syscalls
 
         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
 
-        const uint32_t ret = runtime
-                                 ? runtime->guestHeapLimit()
-                                 : kDefaultGuestHeapEnd;
+        uint32_t ret = runtime
+                           ? runtime->guestHeapLimit()
+                           : kDefaultGuestHeapEnd;
+        if (PS2_RUNTIME_HIGH_ARENA && runtime && runtime->kernelHeapEnd() != 0u)
+        {
+            ret = runtime->kernelHeapEnd();   // [hiarena] the game's kernel heap, not the runtime HLE heap
+        }
 
         setReturnU32(ctx, ret);
     }
