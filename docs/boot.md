@@ -53,7 +53,8 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 3b | Mismo bucle con el reloj ya en marcha: el callback de frame `[0x50B728]` sigue en NULL, `flips=0` | **Resuelto** (3b) | Instalación (c): el init (`sub_00160DF8` → `0x3535E8`) encola cargas en el objeto de streaming `[0x5E5340]` y espera con `0x154AE0`; la primera es `sceOpen("cdrom0:\WARRIORS.DIR")`, que el EE resuelve contra la carpeta del ELF, donde solo estaba el ELF → `fopen` falla y la carga nunca termina | `scripts/extract_iso.py --all` extrae el árbol del disco junto al ELF (decisión del dev: lo hace el wizard de instalación, el ISO se borra después) |
 | 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Resuelto** (3c) | SIF/IOP (b): el handler RPC de MultiStream enlaza el servidor EE `0x12344321` en un bucle sin tope; el EE lo registra desde otro hilo, que nunca corría porque el hilo llamador retenía el token del planificador durante toda la RPC síncrona → el handler se abortaba a los 2 M instrucciones de `ps2xIOP` y MultiStream quedaba sin canal de callbacks IOP→EE (ver detalle) | Hook `IopHost::awaitGuestRpcServer` en `ps2xIOP` (fork) + `PS2Runtime::yieldToOtherGuestThreads` en el adapter |
 | 3c-bis | Con el canal IOP→EE vivo el juego arranca el render: *core dump* por recursión infinita `Store32` → `drainCompletedDmacHandlers` → handler DMAC `sub_0048B708` → `Store32`… | **Resuelto** (3c) | Runtime EE (a): los handlers DMAC se despachaban reentrantes desde el `Store32` que lanza el siguiente DMA, y además reutilizaban la misma pila asíncrona del handler interrumpido. En el EE un handler corre con las interrupciones enmascaradas | `drainCompletedDmacHandlers` no reentra: las completaciones que llegan durante un handler quedan en cola y las entrega el drenaje exterior al volver |
-| 4 | **Primer `flips=1`**. Hilo principal en la espera de flush DMA de RenderWare (`sub_0048C508`, `pc=0x48c5f0`, `ra=0x48c628`): `[gp-0x7600]=0x7acc18 ≠ [gp-0x75FC]=0x7acc10`, contador de completaciones pendientes `[gp-0x7608]=1` | **Abierto** | En diagnóstico, ver detalle | — |
+| 4 | **Primer `flips=1`**. Hilo principal en la espera de flush DMA de RenderWare (`sub_0048C508`, `pc=0x48c5f0`, `ra=0x48c628`): `[gp-0x7600]=0x7acc18 ≠ [gp-0x75FC]=0x7acc10`, contador de completaciones pendientes `[gp-0x7608]=1` | **Resuelto** (sesión 5) | Runtime EE (a) + GS/VIF (d), tres huecos encadenados: (4a) completaciones DMAC entregadas dentro de una sección `di` y desde otro hilo host mientras corría un handler → la cola de paquetes de RW se pasaba del final; (4b) `GIF_STAT` sin modelar y escrituras a `VIF1_FIFO` ignoradas → el paquete `0x21` esperaba `M3P` para siempre en el hilo de vblank; (4c) un kick de cadena vacía no levantaba la interrupción DMAC → `cnt=1` perpetuo | (4a) enmascarado EE: `Status.EIE` por contexto (hilos arrancan con EIE=1, handlers con EXL), entrega diferida en el despachador/tras el handler, profundidad de interrupción y drenaje globales; (4b) `VIF0/VIF1_FIFO` → intérprete VIF (vía worker asíncrono) y `GIF_STAT` con `M3R/M3P/IMT/PSE/FQC` como upstream; (4c) todo canal iniciado con `STR` completa aunque no traiga datos |
+| 5 | ~30 flips/s y `prims/sec≈180` durante 20–50 s (varía por ejecución); después cae a ~1 flip/s, otra vez en `pc=0x48c5f0` con otra cadena (`0x48e118 ← 0x48fd28 ← 0x482814* ← 0x198b4c ← 0x19596c* …`). La ventana se ve en negro en `xwd` (sin confirmar si es la captura o el render) | **Abierto** | Sin diagnosticar | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -139,15 +140,44 @@ handler en curso: recursión sin fin (y cada nivel reusaba la pila asíncrona de
 `drainCompletedDmacHandlers` no reentra y el drenaje exterior entrega las completaciones pendientes en
 bucle hasta vaciar la cola.
 
-### Detalle del bloqueo 4 — espera de flush DMA de RenderWare (en diagnóstico)
+### Detalle del bloqueo 4 — espera de flush DMA de RenderWare (resuelto, sesión 5)
 
-`sub_0048C508` (flush/swap de RW) espera en `0x48c5f0` a que la cola esté vacía y no queden
-completaciones pendientes (`[gp-0x7600] == [gp-0x75FC]` y `[gp-0x7608] == 0`), luego intercambia
-búferes con `di` y llama `handler(-1)`. El primer frame pasa (2 completaciones VIF1, cola vacía,
-`flips=1`). En el segundo, `handler(-1)` fija `[gp-0x7608]=1` y avanza `q0` a `0x7acc18` **sin escribir
-ningún `CHCR`**: toma otra rama del decodificador de paquetes (tipo en el byte bajo de `[q0]`: `0x41`,
-`0x21`, `0x43`, `0x4F`…, ramas que consultan `VIF1_STAT`/`GIF_STAT` `0x10003020` y VU1). Siguiente paso:
-identificar el tipo de paquete y qué estado de hardware lee esa rama.
+`sub_0048B708` es el handler DMAC de RenderWare (causas 1 = VIF1 y 2 = GIF) y también se llama con
+`a0=-1` para "kick manual": desde `sub_0048C508` (hilo principal, dentro de `di`) y desde el handler de
+VBLANK_START `sub_0048BDB0` (registrado con `AddIntcHandler(2, 0x48bdb0)`). Recorre una cola de
+paquetes `[gp-0x7600]..[gp-0x75FC]` (8 bytes: tipo en el byte bajo + dato) y cuenta en `[gp-0x7608]`
+las completaciones que espera. Tipos vistos: `0x01` kick VIF1 (`CHCR=0x145`, +1), `0x21` kick GIF+VIF1
+con sincronía PATH3 (+2), `0x41`/`0x40` espera de vblank (`[gp-0x7665]=1`, la limpia `0x48BDB0`),
+`0x42`, `0x4F` callback `[q+4](a0)`.
+
+Tres huecos del runtime, en el orden en que aparecieron:
+
+1. **(4a) Interrupciones sin enmascarar.** El DMA se completa síncrono en el `Store32` a `CHCR` y el
+   runtime ejecutaba en ese momento el handler DMAC anidado, aunque el llamador estuviera en `di`. El
+   `handler(1)` anidado veía `cnt=0`, re-lanzaba el mismo paquete y avanzaba la cola; al volver, el
+   `handler(-1)` exterior releía `q0` y le sumaba 8 → `q0` quedaba **después** de `end` y la espera de
+   `0x48c5f0` (`q0==end && cnt==0`) no se cumplía nunca. Después apareció la variante entre hilos: el
+   handler de vblank corre en el hilo host de interrupciones y el hilo principal entregaba en su
+   despachador la completación que ese handler acababa de provocar. Corrección: `R5900Context` arranca
+   con `Status.EIE` (los `di`/`ei` generados solo tocan ese bit), los contextos de handler llevan `EXL`
+   y `EIE=0`, `Store32` solo entrega si el contexto tiene interrupciones habilitadas, el despachador de
+   cada hilo entrega las pendientes en cuanto vuelve a tener `EIE` (tras `ei`, vía checkpoint), y al
+   terminar los handlers INTC se entregan las que provocaron. Profundidad de interrupción y guardia de
+   drenaje globales: ningún hilo entrega mientras corre un handler y dos handlers DMAC no se solapan.
+2. **(4b) PATH3 sin modelar.** El paquete `0x21` espera que todo esté inactivo, escribe
+   `MSKPATH3 (0x06008000)` en `VIF1_FIFO` (`0x10005000`), espera `GIF_STAT.M3P`, lanza GIF, espera
+   `GIF_STAT.FQC != 0` y lanza VIF1. El runtime ignoraba las escrituras a la FIFO y devolvía en
+   `GIF_STAT` lo último escrito (0): el handler giraba para siempre en el hilo de vblank y los vblanks
+   se paraban. Corrección (portada de upstream `ps2xRuntime`): `VIF0/VIF1_FIFO` alimentan al
+   intérprete VIF (VIF1 vía worker asíncrono, en orden con los kicks) y `GIF_STAT` sintetiza
+   `M3R/IMT` (`GIF_MODE`), `PSE` (`GIF_CTRL`), `M3P` (`MSKPATH3`) y `FQC` (qwords PATH3 aparcados
+   mientras está enmascarado, tope 16).
+3. **(4c) Cadena vacía sin interrupción.** La completación se encolaba solo si el kick había producido
+   datos. Un kick cuya cadena es un único tag `END`/`REFE` con `QWC=0` terminaba sin `CIS` ni
+   interrupción y `cnt` quedaba en 1. Corrección: todo canal iniciado con `STR` completa.
+
+Resultado: `flips` pasa de 1 a ~1 500 en 50 s (~30/s) con `prims/sec ≈ 180` → Escenario 4 cumplido por
+log. Siguiente: bloqueo 5.
 
 ## Capa BT3 retirada en TWR-27
 
