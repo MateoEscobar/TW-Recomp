@@ -3748,6 +3748,28 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
                 std::fprintf(stderr, "[stallprobe] pc=0x%x x%u %s ra=0x%x | t6=0x%x [t6+8]=0x%x [t6+0]=0x%08x [t6+4]=0x%08x [t6+c]=0x%08x | a0=0x%x a1=0x%x a2=0x%x a3=0x%x v0=0x%x s0=0x%x s1=0x%x s2=0x%x t7=0x%x t8=0x%x\n",
                              pc, samePcCount, (ctx == &m_cpuContext) ? "main" : "thread", R(31), t6, rd16(t6 + 8u), rd32(t6), rd32(t6 + 4u), rd32(t6 + 0xCu),
                              R(4), R(5), R(6), R(7), R(2), R(16), R(17), R(18), R(15), R(24));
+                if (samePcCount == 2000u)
+                {   // [stallprobe] heuristic guest backtrace: words in [sp, sp+0x800) that point into the ELF code
+                    // and sit right after a jal/jalr (return-address shape). Names the caller chain of the spin
+                    // without hooking any game function (ADR TWR-27 D4).
+                    const uint32_t sp = R(29);
+                    std::string chain;
+                    uint32_t found = 0u;
+                    for (uint32_t off = 0u; off < 0x800u && found < 16u; off += 4u)
+                    {
+                        const uint32_t w = rd32(sp + off);
+                        if ((w & 3u) != 0u || w < 0x100008u || w >= 0x2000000u || !hasFunction(w & ~0x3u)) continue;
+                        const uint32_t call = rd32(w - 8u);
+                        const bool isJal = (call >> 26) == 3u;
+                        const bool isJalr = (call >> 26) == 0u && (call & 0x3Fu) == 9u;
+                        if (!isJal && !isJalr) continue;
+                        char buf[48];
+                        std::snprintf(buf, sizeof(buf), " [sp+0x%x]=0x%x%s", off, w, isJal ? "" : "*");
+                        chain += buf;
+                        ++found;
+                    }
+                    std::fprintf(stderr, "[stallprobe] sp=0x%x backtrace:%s\n", sp, chain.empty() ? " (none)" : chain.c_str());
+                }
             }
             if ((samePcCount % 2000u) == 0u && ctx == &m_cpuContext)   // [pumpmain] never run the tick on a sound thread's 2 KB stack
             {   // [spinpump] a busy-poll: advance the CD file server and let other guest threads run (see game_overrides)
