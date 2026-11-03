@@ -176,6 +176,11 @@ struct alignas(16) R5900Context
 
         // Initialize VU0 registers
         vu0_q = 1.0f; // Q register usually initialized to 1.0
+        // [TWR-27] VF0 is hardwired to (0,0,0,1). Every context needs it, not only the main thread
+        // and CreateThread: interrupt handlers, alarm/vsync callbacks and IOP->EE calls build their
+        // own context, and RenderWare adds the translation row with `vmaddw ..., $vf0w`
+        // (RwMatrixMultiply 0x47d280) -- with w = 0 every matrix built there loses its translation.
+        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
 
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value

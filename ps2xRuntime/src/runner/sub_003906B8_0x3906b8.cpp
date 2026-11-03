@@ -436,7 +436,7 @@ label_390754:
 label_390758:
     // 0x390758: 0x700846c9  prevh       $t0, $t0
     ctx->pc = 0x390758u;
-    { __m128i mask = _mm_setr_epi8(14,15, 12,13, 10,11, 8,9, 6,7, 4,5, 2,3, 0,1); SET_GPR_VEC(ctx, 8, PS2_SHUFFLE_EPI8(GPR_VEC(ctx, 8), mask)); }
+    SET_GPR_VEC(ctx, 8, PS2_PREVH(GPR_VEC(ctx, 8))); // [TWR-27] reversed all 8 halfwords - do not regenerate without the fixed recompiler
 label_39075c:
     // 0x39075c: 0x70084588  pextlh      $t0, $zero, $t0
     ctx->pc = 0x39075cu;
@@ -540,7 +540,7 @@ label_3907bc:
 label_3907c0:
     // 0x3907c0: 0x700846c9  prevh       $t0, $t0
     ctx->pc = 0x3907c0u;
-    { __m128i mask = _mm_setr_epi8(14,15, 12,13, 10,11, 8,9, 6,7, 4,5, 2,3, 0,1); SET_GPR_VEC(ctx, 8, PS2_SHUFFLE_EPI8(GPR_VEC(ctx, 8), mask)); }
+    SET_GPR_VEC(ctx, 8, PS2_PREVH(GPR_VEC(ctx, 8))); // [TWR-27] reversed all 8 halfwords - do not regenerate without the fixed recompiler
 label_3907c4:
     // 0x3907c4: 0x70084588  pextlh      $t0, $zero, $t0
     ctx->pc = 0x3907c4u;

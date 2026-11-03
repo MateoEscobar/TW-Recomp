@@ -59,7 +59,7 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 7 | Con datos GIF reales el hilo principal se queda para siempre en `0x48c5f0` (flush DMA de RW) a los ~3-5 s: `cnt=[gp-0x7608]=1`, `q0=[gp-0x7600]` **pasado** de `q1=[gp-0x75FC]` (q0 = q1 + 8), VIF1/GIF ociosos | **Resuelto** (sesión 9) | Runtime EE (a): los handlers de interrupción corrían en el worker de vblank en paralelo con el hilo guest que interrumpen; el handler DMAC `sub_0048B708` y el hilo principal (`sub_0048E048`, `handler(-1)` sin `di`) procesaban la misma entrada de la cola | Decisión 17: entrega de INTC/DMAC en checkpoints del hilo con el token (`eeCheckpointDue`, `dispatchGuestBranch`, despachadores, `Store32`); el worker solo marca causas y entrega él únicamente con la CPU ociosa (ver detalle) |
 | 8 | Sin atasco, `flips` sube y `prims/sec` llega a ~40 000, pero la pantalla sigue negra (`Mpix/sec=0`) y la RSS crece ~1 GB/s hasta agotar la RAM | **Resuelto** (sesión 9) | Render (d): el camino GPU estaba activo por defecto (`uiFlag("PS2X_GPU", true)` + `renderer = opengl` del overlay, que además pisaba `PS2X_GPU=0`). Su única publicación de frame era el kick de render de BT3 (`0x100ab8`), retirado en 3a: todo se grababa en `m_building`, nadie lo consumía, y el rasterizador SW no corría | Decisión 15 completada: software por defecto (`kRendererDefault = 1`, `PS2X_GPU` opt-in), `syncFromRuntime` coherente con el flag. Más: accesores VRAM por PSM a 64 entradas (índice `0x3F` fuera de rango → SIGSEGV en `sampleTexture`) |
 | 9 | Con el rasterizador SW hay imagen, pero incorrecta (rellenos de color sólido, diagonales, una franja de texto con texturas/CLUT mal decodificadas) y ~1-2 flips/s: el hilo principal pasa ~100 % en `0x48BB00` rasterizando dentro del kick síncrono de RW (en `di`) | **Resuelto** (sesión 10) | VIF/DMA (d) + VU1 (d), dos causas encadenadas (ver detalle): (9a) el DMA en cadena heredado no enviaba al VIF la mitad alta de las etiquetas `REF/REFS/REFE` con `CHCR.TTE=1`, así que el `UNPACK` que RW pone en esas etiquetas se perdía y los vértices se leían como VIFcodes; (9b) el intérprete VU1 heredado de BT3 diverge del VU1 exacto de upstream en todos los microprogramas de Warriors | (9a) tag-transfer para toda etiqueta VIF con `TTE` (como upstream); (9b) decisión 20: VU1 exacto de upstream vía adaptador (`ps2_vu1_upstream`) + fixes VU1 de GoW en el fork (`7b4abbe`). Resultado: aviso de autoguardado y pantalla de título, ~30 flips/s estables |
-| 10 | Pantalla de título visible pero con defectos: (10a) aviso de autoguardado y "PRESS THE START BUTTON" rotados 180°; (10b) 1 de cada ~4 glifos de "PRESS START" con ruido; (10c) falta la noria *Wonder Wheel* animada a la derecha (referencia: vídeos de la PS2 original) | 10a/10b **resueltos** (sesión 10), 10c **abierto** | Render (d): (10a) `drawSprite` SW intercambiaba posiciones sin UV; (10b) el GS aplicaba al vértice la Q de un ST PACKED al instante, cuando en el hardware solo la fija en el registro Q interno y la copia el siguiente RGBAQ. Los sprites de la fuente 2D llevan `ST RGBAQ XYZ2 ST XYZ2` y el segundo ST trae Q con memoria VU rancia; (10c) la geometría 3D de la noria (tiras texturizadas color 29,0,29, programa VU1 3D, entradas `0x0`/`0xf70`) llega al GS **colapsada**: casi todos los vértices en el centro de pantalla (320,224) → transformación 3D con matriz nula o incorrecta | (10a) UV intercambiadas junto con las posiciones; (10b) registro Q interno `m_stqQ` como PCSX2 (`0 → FLT_MIN`, `NaN → FLT_MAX`, reinicio por GIFtag) + Q plana del segundo vértice en sprites; (10c) pendiente: rastrear la matriz que recibe el programa 3D (sube por VIF desde el EE; revisar el cálculo en el EE con VU0/COP2) |
+| 10 | Pantalla de título visible pero con defectos: (10a) aviso de autoguardado y "PRESS THE START BUTTON" rotados 180°; (10b) 1 de cada ~4 glifos de "PRESS START" con ruido; (10c) falta la noria *Wonder Wheel* animada a la derecha (referencia: vídeos de la PS2 original) | 10a/10b **resueltos** (sesión 10), 10c **causa raíz resuelta** (sesión 11; queda 10d: la geometría no se ve) | Render (d): (10a) `drawSprite` SW intercambiaba posiciones sin UV; (10b) el GS aplicaba al vértice la Q de un ST PACKED al instante, cuando en el hardware solo la fija en el registro Q interno y la copia el siguiente RGBAQ. Los sprites de la fuente 2D llevan `ST RGBAQ XYZ2 ST XYZ2` y el segundo ST trae Q con memoria VU rancia; (10c) la geometría 3D de la noria (tiras texturizadas color 29,0,29, programa VU1 3D, entradas `0x0`/`0xf70`) llega al GS **colapsada**: casi todos los vértices en el centro de pantalla (320,224) → transformación 3D con matriz nula o incorrecta | (10a) UV intercambiadas junto con las posiciones; (10b) registro Q interno `m_stqQ` como PCSX2 (`0 → FLT_MIN`, `NaN → FLT_MAX`, reinicio por GIFtag) + Q plana del segundo vértice en sprites; (10c) pendiente: rastrear la matriz que recibe el programa 3D (sube por VIF desde el EE; revisar el cálculo en el EE con VU0/COP2) |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -135,6 +135,39 @@ Resultado: el bind se resuelve al segundo intento, `ee-rpc sid=0x12344321 … ok
 Riesgo conocido: durante la cesión, si otro hilo EE hiciera una RPC al IOP se bloquearía en
 `g_sif_call_rpc_mutex` con el token tomado. No ocurre en Warriors (el hilo 2 solo registra su servidor y
 entra en su bucle); si aparece, el volcado del planificador lo muestra.
+
+### Detalle del bloqueo 10c — noria colapsada al centro (sesión 11)
+
+Cadena verificada con sondas temporales y un arnés offline del VU1 upstream sobre volcados de la memoria VU1:
+
+1. La noria la dibuja el programa VU1 3D grande (MPG `0x0..0x2630`, `MSCAL 0`). Sus vértices son enteros
+   (UNPACK V4-16/V2-16/V4-8). El programa elige en `0xc8` (`FMAND vi07, vi07` sobre **Zw** de
+   `ADDx.w vf06, vf05, vf00x`) entre el camino estático (`0xd8`: ITOF0 × escala de `qw956`) y el de morph
+   (`0x1b0`), que mezcla dos keyframes con el peso `qw1020.w`.
+2. `qw1020.w` llegaba con `0x6c0103fc`, es decir, el VIFcode del propio UNPACK (6e26 como float). El VU1 tomaba
+   el morph con ese peso → `Q≈0` → todos los vértices en (2048,2048)+0 = centro, con ST = 0. Si se fuerza el camino
+   estático en el arnés, el mismo volcado da la noria repartida en pantalla.
+3. La qword viene así de la RAM: la arma RenderWare en `sub_00477858` (`0x477b38`: `mfc1 → pexew → mfc1 → ppacw`).
+   `PPACW` toma la palabra 2 de un registro de 128 bits que debía poner `PEXEW`. Nuestro `PS2_PEXEW` intercambiaba
+   las palabras por parejas (0↔1, 2↔3) en lugar de 0↔2, así que la palabra 2 recibía la palabra 3 anterior del
+   registro: el VIFcode que acababa de escribir el mismo código.
+
+**Corrección:** permutaciones MMI del R5900 como PCSX2 (`MMI.cpp`). Se porta `ps2recomp-mmi.patch` de
+god-of-war-recomp: macros de `ps2_runtime_macros.h` (`PEXEW`, `PROT3W`, `PEXEH`, `PEXCW`, `PEXCH`, `PREVH`,
+`PINTH`, `PINTEH`), generador del recompilador y tests en el fork (`feature/TWR-27-mmi-permutations`). Las 36
+`pexcw` y 4 `prevh` del runner que se emitían en línea se reescriben a las macros, con un comentario de guarda.
+Upstream tiene el mismo fallo.
+
+**También (sesión 11):**
+- `R5900Context()` deja `vf0 = (0,0,0,1)` en todos los contextos: IRQ, alarmas, callbacks y RPC IOP→EE. Antes solo
+  lo hacían el hilo principal y `CreateThread`. RenderWare suma la traslación con `vmaddw …, $vf0w`. No era la causa
+  de 10c.
+- Hallazgo lateral: la cámara del título se mueve al origen dos veces por frame (`sub_0040D0A8`: `0x40d234`,
+  `0x40d3c8`) y se restaura después (`0x40d494`). Es diseño del juego, el patrón skybox, y no es un fallo.
+
+**Pendiente (10d):** tras el arreglo, la geometría llega al GS en la mitad derecha (x≈384–623, y≈57–420), pero no
+escribe píxeles visibles. Es PSMT4 texturizado, `TEST=0x5140b` (alpha test GEQUAL 0x40, FAIL=FB_ONLY; Z GEQUAL) y
+`ALPHA=0x44`. Rendimiento SW: ~11 flips/s (antes ~20–30), porque ahora se rasteriza la geometría 3D real.
 
 ### Detalle del bloqueo 3c-bis — handlers DMAC reentrantes
 

@@ -64,16 +64,16 @@ void sub_001807E0_0x1807e0(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtim
     SET_GPR_U64(ctx, 11, GPR_U64(ctx, 11) ^ GPR_U64(ctx, 7));
     // 0x180810: 0x700847a9  pexcw       $t0, $t0
     ctx->pc = 0x180810u;
-    SET_GPR_VEC(ctx, 8, _mm_shuffle_epi32(GPR_VEC(ctx, 8), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 8, PS2_PEXCW(GPR_VEC(ctx, 8))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
     // 0x180814: 0x70094fa9  pexcw       $t1, $t1
     ctx->pc = 0x180814u;
-    SET_GPR_VEC(ctx, 9, _mm_shuffle_epi32(GPR_VEC(ctx, 9), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 9, PS2_PEXCW(GPR_VEC(ctx, 9))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
     // 0x180818: 0x700a57a9  pexcw       $t2, $t2
     ctx->pc = 0x180818u;
-    SET_GPR_VEC(ctx, 10, _mm_shuffle_epi32(GPR_VEC(ctx, 10), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 10, PS2_PEXCW(GPR_VEC(ctx, 10))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
     // 0x18081c: 0x700b5fa9  pexcw       $t3, $t3
     ctx->pc = 0x18081cu;
-    SET_GPR_VEC(ctx, 11, _mm_shuffle_epi32(GPR_VEC(ctx, 11), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 11, PS2_PEXCW(GPR_VEC(ctx, 11))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
     // 0x180820: 0x7fa80000  sq          $t0, 0x0($sp)
     ctx->pc = 0x180820u;
     WRITE128(ADD32(GPR_U32(ctx, 29), 0), GPR_VEC(ctx, 8));

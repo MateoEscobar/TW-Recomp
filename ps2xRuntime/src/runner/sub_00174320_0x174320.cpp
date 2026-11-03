@@ -3285,19 +3285,19 @@ label_174a60:
 label_174a64:
     // 0x174a64: 0x700847a9  pexcw       $t0, $t0
     ctx->pc = 0x174a64u;
-    SET_GPR_VEC(ctx, 8, _mm_shuffle_epi32(GPR_VEC(ctx, 8), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 8, PS2_PEXCW(GPR_VEC(ctx, 8))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
 label_174a68:
     // 0x174a68: 0x70094fa9  pexcw       $t1, $t1
     ctx->pc = 0x174a68u;
-    SET_GPR_VEC(ctx, 9, _mm_shuffle_epi32(GPR_VEC(ctx, 9), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 9, PS2_PEXCW(GPR_VEC(ctx, 9))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
 label_174a6c:
     // 0x174a6c: 0x700a57a9  pexcw       $t2, $t2
     ctx->pc = 0x174a6cu;
-    SET_GPR_VEC(ctx, 10, _mm_shuffle_epi32(GPR_VEC(ctx, 10), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 10, PS2_PEXCW(GPR_VEC(ctx, 10))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
 label_174a70:
     // 0x174a70: 0x700b5fa9  pexcw       $t3, $t3
     ctx->pc = 0x174a70u;
-    SET_GPR_VEC(ctx, 11, _mm_shuffle_epi32(GPR_VEC(ctx, 11), _MM_SHUFFLE(1,0,3,2)));
+    SET_GPR_VEC(ctx, 11, PS2_PEXCW(GPR_VEC(ctx, 11))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
 label_174a74:
     // 0x174a74: 0x7d880000  sq          $t0, 0x0($t4)
     ctx->pc = 0x174a74u;
