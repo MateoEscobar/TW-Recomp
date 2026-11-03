@@ -51,7 +51,9 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 2 | Hilo principal en `0x47dd70` (`ra=0x47dd90`, `a1=a2=0x2000010`), `flips=0` | **Resuelto** (3b) | Runtime EE (a): `SetupHeap` recortaba el heap del kernel a `0x01F00000`; el juego pide `0x715b60..0x1FF0004` y reserva toda la RAM libre con un `malloc` (ver detalle) | Mapa de memoria `[hiarena]` (`ps2_memory.h`) + `SetupHeap`/`EndOfHeap` con semántica de kernel |
 | 3a | Bucle de frame en `0x148D10` con `sceGsSyncV` (~60/s), `flips=0`: el reloj del juego no avanza (`now=0`) | **Resuelto** (3b) | Runtime EE (a): `mfc0 Count` se traduce a `ctx->cop0_count` y nada incrementaba ese registro (ni aquí ni en el runtime upstream) | `COP0 Count` global a 294,912 MHz sobre el reloj de los timers EE (`Ps2Cop0CountReg`, `ps2xCop0CountRead/Write`) |
 | 3b | Mismo bucle con el reloj ya en marcha: el callback de frame `[0x50B728]` sigue en NULL, `flips=0` | **Resuelto** (3b) | Instalación (c): el init (`sub_00160DF8` → `0x3535E8`) encola cargas en el objeto de streaming `[0x5E5340]` y espera con `0x154AE0`; la primera es `sceOpen("cdrom0:\WARRIORS.DIR")`, que el EE resuelve contra la carpeta del ELF, donde solo estaba el ELF → `fopen` falla y la carga nunca termina | `scripts/extract_iso.py --all` extrae el árbol del disco junto al ELF (decisión del dev: lo hace el wizard de instalación, el ISO se borra después) |
-| 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Abierto** (3c) | En diagnóstico, ver detalle | — |
+| 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Resuelto** (3c) | SIF/IOP (b): el handler RPC de MultiStream enlaza el servidor EE `0x12344321` en un bucle sin tope; el EE lo registra desde otro hilo, que nunca corría porque el hilo llamador retenía el token del planificador durante toda la RPC síncrona → el handler se abortaba a los 2 M instrucciones de `ps2xIOP` y MultiStream quedaba sin canal de callbacks IOP→EE (ver detalle) | Hook `IopHost::awaitGuestRpcServer` en `ps2xIOP` (fork) + `PS2Runtime::yieldToOtherGuestThreads` en el adapter |
+| 3c-bis | Con el canal IOP→EE vivo el juego arranca el render: *core dump* por recursión infinita `Store32` → `drainCompletedDmacHandlers` → handler DMAC `sub_0048B708` → `Store32`… | **Resuelto** (3c) | Runtime EE (a): los handlers DMAC se despachaban reentrantes desde el `Store32` que lanza el siguiente DMA, y además reutilizaban la misma pila asíncrona del handler interrumpido. En el EE un handler corre con las interrupciones enmascaradas | `drainCompletedDmacHandlers` no reentra: las completaciones que llegan durante un handler quedan en cola y las entrega el drenaje exterior al volver |
+| 4 | **Primer `flips=1`**. Hilo principal en la espera de flush DMA de RenderWare (`sub_0048C508`, `pc=0x48c5f0`, `ra=0x48c628`): `[gp-0x7600]=0x7acc18 ≠ [gp-0x75FC]=0x7acc10`, contador de completaciones pendientes `[gp-0x7608]=1` | **Abierto** | En diagnóstico, ver detalle | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -97,24 +99,55 @@ Count`) fija un desplazamiento global, como el registro real. No hace falta rege
 lectores (`0x148FC8`, `0x48B708`, `0x48BDB0`, `0x4CD3D0`) usan el campo tal cual. Verificado: `now`
 avanza en ms (0 → 58 082 en ~58 s).
 
-### Detalle del bloqueo 3c — carga de `scene_list.cnk` que no termina (en diagnóstico)
+### Detalle del bloqueo 3c — bind IOP→EE de MultiStream que no podía terminar
 
 Cadena verificada con trazas: `sub_00160DF8` (init) → `0x3535E8` → `0x154A28`/`0x154D50` encolan
 `scene_list.cnk` (dentro de `WARRIORS.WAD`; `WARRIORS.DIR` = 10 701 entradas de 12 bytes `{offset en el
-WAD, tamaño, hash}`, desplazamientos relativos, no LBAs absolutos) → `0x154AE0` espera → `0x1549F8` corre
-el bucle principal `0x148C90` hasta que `isDone` (`0x148C38` → `0x1494D8` → `0x150838`) ve el estado del
-canal 0 del cargador (`0x5E3AC8[0]`) en 0 o 3.
+WAD, tamaño, hash}`) → `0x154AE0` espera → `0x1549F8` corre el bucle principal `0x148C90` hasta que
+`isDone` (`0x148C38` → `0x1494D8` → `0x150838`) ve el estado del canal 0 del cargador (`0x5E3AC8[0]`) en
+0 o 3. El estado quedaba en **1** y el IOP no hacía ninguna lectura de CD.
 
-Observado: el estado queda en **1** todo el tiempo; el único RPC es `0x12345` rpcNum 0 (búfer de
-comandos MultiStream, 4 KB) cada frame desde `0x14DA24`, y la respuesta (`0x5E2DC0`) cambia cada frame
-(`0x0000XX01`: contador en el byte 1, byte bajo `01`). `0x14EE88` decodifica campos de bits de esa
-respuesta hacia la tabla de estados. El IOP **no hace ninguna lectura de CD** (ni `sceCdSearchFile` ni
-`sceCdRead` en el log con `PS2X_IOP_LOG=1`).
+Causa (traza de importaciones del IOP): el primer RPC `0x12345` (bloqueante, `mode=0`) lleva el comando
+de init de MultiStream; su handler (`0x275c0`, ejecutado por `ps2xIOP` dentro de `callFunction`) crea el
+hilo de streaming y llama `0x309e8(0)`, que hace `do { sceSifBindRpc(&cd, 0x12344321, 0); } while
+(cd.server == 0);` sin tope. `0x12344321` es el servidor de callbacks que registra el hilo EE 2
+(`entry 0x151360`, prio 9), creado justo antes. En hardware el hilo principal está bloqueado en
+`sceSifCallRpc` y el EE corre el hilo 2, que registra el servidor; aquí el hilo 1 retenía el token del
+planificador cooperativo durante toda la llamada síncrona (`[sched] tid 2 ACQUIRE-wait (cur=1)`), el bind
+giraba ~180 000 veces y `ps2xIOP` cortaba el handler al agotar `kMaxCallInstructions` (2 M). MultiStream
+seguía sin cliente EE: nunca notificaba el fin de las peticiones FILE y el canal 0 se quedaba en 1.
 
-Hipótesis (sin verificar): el canal FILE de MultiStream (`IOP.IRX`) acepta la petición pero su lectura de
-disco nunca arranca o nunca completa en `ps2xIOP` (hilo de carga sin despertar, `sceCdRead` asíncrono sin
-callback/IRQ de fin, o `sceCdSearchFile` de `WARRIORS.WAD` sin resolver). Siguiente paso: trazas de
-importaciones del IOP (`PS2X_IOP_XCALL_*`) sobre `cdvdman`/`thbase`/`thsemap` mientras el EE espera.
+Corrección (sin tocar el juego):
+- `ps2xIOP` (fork): `sceSifBindRpc` llama al hook nuevo `IopHost::awaitGuestRpcServer(sid)` cuando el
+  servidor EE todavía no existe (por defecto no hace nada). Test en `iop_emulator_tests.cpp`.
+- `ps2xRuntime`: el adapter, si la llamada viene de una RPC síncrona del EE, cede el turno a los otros
+  hilos guest (`PS2Runtime::yieldToOtherGuestThreads` → `schedYield`) y vuelve a consultar.
+
+Resultado: el bind se resuelve al segundo intento, `ee-rpc sid=0x12344321 … ok=1` en cada callback,
+`scene_list.cnk` termina de cargar y el juego llega al render.
+
+Riesgo conocido: durante la cesión, si otro hilo EE hiciera una RPC al IOP se bloquearía en
+`g_sif_call_rpc_mutex` con el token tomado. No ocurre en Warriors (el hilo 2 solo registra su servidor y
+entra en su bucle); si aparece, el volcado del planificador lo muestra.
+
+### Detalle del bloqueo 3c-bis — handlers DMAC reentrantes
+
+`sub_0048B708` es el handler DMAC de RenderWare (causas 1 VIF1 / 2 GIF y llamada directa con `a0=-1`
+para lanzar): consume la cola de paquetes `[gp-0x7600]..[gp-0x75FC]` y escribe el `CHCR` del siguiente.
+El runtime completa el DMA dentro de ese `Store32` y despachaba los handlers en el acto, dentro del
+handler en curso: recursión sin fin (y cada nivel reusaba la pila asíncrona del anterior). Ahora
+`drainCompletedDmacHandlers` no reentra y el drenaje exterior entrega las completaciones pendientes en
+bucle hasta vaciar la cola.
+
+### Detalle del bloqueo 4 — espera de flush DMA de RenderWare (en diagnóstico)
+
+`sub_0048C508` (flush/swap de RW) espera en `0x48c5f0` a que la cola esté vacía y no queden
+completaciones pendientes (`[gp-0x7600] == [gp-0x75FC]` y `[gp-0x7608] == 0`), luego intercambia
+búferes con `di` y llama `handler(-1)`. El primer frame pasa (2 completaciones VIF1, cola vacía,
+`flips=1`). En el segundo, `handler(-1)` fija `[gp-0x7608]=1` y avanza `q0` a `0x7acc18` **sin escribir
+ningún `CHCR`**: toma otra rama del decodificador de paquetes (tipo en el byte bajo de `[q0]`: `0x41`,
+`0x21`, `0x43`, `0x4F`…, ramas que consultan `VIF1_STAT`/`GIF_STAT` `0x10003020` y VU1). Siguiente paso:
+identificar el tipo de paquete y qué estado de hardware lee esa rama.
 
 ## Capa BT3 retirada en TWR-27
 
