@@ -58,7 +58,8 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 6 | Con el SPU2 la música se transmite pero la pantalla sigue negra: `prims/sec≈180`, `Mpix/sec=0`. Los ~6 prims/frame son POINT con XYZ=0 y RGBA=0 por PATH2; nada por PATH1 | **Resuelto** (sesión 8) | GS/VIF (d) + runtime EE (a): RenderWare arma sus paquetes GIF en el scratchpad y los copia a la lista DMA de RAM con DMA **fromSPR** (canal 8, modo normal, ~350/s). El runtime heredado de BT3 no implementaba los canales 8/9 → la lista que leía VIF1 (`cnt qwc=72; DIRECT 72` en `0x7acc80`/`0x87c880`) solo tenía las etiquetas escritas por la CPU y ceros en lugar de los datos GIF (ver detalle) | `PS2Memory::tryProcessScratchpadDma` portado de upstream (canales 8/9 en modo normal, `D_STAT.CIS8/9`, aviso único `[sprdma]` en modos cadena/intercalado). Resultado: borrado de pantalla real de RW (franjas de 32 px) y sprites texturizados por PATH1 (VU1) |
 | 7 | Con datos GIF reales el hilo principal se queda para siempre en `0x48c5f0` (flush DMA de RW) a los ~3-5 s: `cnt=[gp-0x7608]=1`, `q0=[gp-0x7600]` **pasado** de `q1=[gp-0x75FC]` (q0 = q1 + 8), VIF1/GIF ociosos | **Resuelto** (sesión 9) | Runtime EE (a): los handlers de interrupción corrían en el worker de vblank en paralelo con el hilo guest que interrumpen; el handler DMAC `sub_0048B708` y el hilo principal (`sub_0048E048`, `handler(-1)` sin `di`) procesaban la misma entrada de la cola | Decisión 17: entrega de INTC/DMAC en checkpoints del hilo con el token (`eeCheckpointDue`, `dispatchGuestBranch`, despachadores, `Store32`); el worker solo marca causas y entrega él únicamente con la CPU ociosa (ver detalle) |
 | 8 | Sin atasco, `flips` sube y `prims/sec` llega a ~40 000, pero la pantalla sigue negra (`Mpix/sec=0`) y la RSS crece ~1 GB/s hasta agotar la RAM | **Resuelto** (sesión 9) | Render (d): el camino GPU estaba activo por defecto (`uiFlag("PS2X_GPU", true)` + `renderer = opengl` del overlay, que además pisaba `PS2X_GPU=0`). Su única publicación de frame era el kick de render de BT3 (`0x100ab8`), retirado en 3a: todo se grababa en `m_building`, nadie lo consumía, y el rasterizador SW no corría | Decisión 15 completada: software por defecto (`kRendererDefault = 1`, `PS2X_GPU` opt-in), `syncFromRuntime` coherente con el flag. Más: accesores VRAM por PSM a 64 entradas (índice `0x3F` fuera de rango → SIGSEGV en `sampleTexture`) |
-| 9 | Con el rasterizador SW hay imagen, pero incorrecta (rellenos de color sólido, diagonales, una franja de texto con texturas/CLUT mal decodificadas) y ~1-2 flips/s: el hilo principal pasa ~100 % en `0x48BB00` rasterizando dentro del kick síncrono de RW (en `di`) | **Abierto** | Render (d): rasterizador SW heredado de BT3 frente a lo que dibuja Warriors (formatos de textura/CLUT, VU1 con microprogramas interpretados `[vu1jit] uncompiled`), y DMA GIF/VIF síncrono dentro del `Store32` del kick | Pendiente: capturas por etapa y comparación con el GS real; posible parada D5 (renderer RW completo, TWR-14) — consultar con el dev |
+| 9 | Con el rasterizador SW hay imagen, pero incorrecta (rellenos de color sólido, diagonales, una franja de texto con texturas/CLUT mal decodificadas) y ~1-2 flips/s: el hilo principal pasa ~100 % en `0x48BB00` rasterizando dentro del kick síncrono de RW (en `di`) | **Resuelto** (sesión 10) | VIF/DMA (d) + VU1 (d), dos causas encadenadas (ver detalle): (9a) el DMA en cadena heredado no enviaba al VIF la mitad alta de las etiquetas `REF/REFS/REFE` con `CHCR.TTE=1`, así que el `UNPACK` que RW pone en esas etiquetas se perdía y los vértices se leían como VIFcodes; (9b) el intérprete VU1 heredado de BT3 diverge del VU1 exacto de upstream en todos los microprogramas de Warriors | (9a) tag-transfer para toda etiqueta VIF con `TTE` (como upstream); (9b) decisión 20: VU1 exacto de upstream vía adaptador (`ps2_vu1_upstream`) + fixes VU1 de GoW en el fork (`7b4abbe`). Resultado: aviso de autoguardado y pantalla de título, ~30 flips/s estables |
+| 10 | Pantalla de título visible pero con defectos: el aviso de autoguardado sale invertido en vertical, el texto "PRESS THE START BUTTON" espejado y pixelado (el logo sale bien) | **Abierto** | Render (d), por diagnosticar: coordenadas Y/V de ciertos sprites en el rasterizador SW o composición del framebuffer de pantalla | Pendiente |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -336,6 +337,37 @@ Sigue abierta como síntoma secundario del bloqueo 5; se revisa después del SPU
 - **Nota:** en la sesión 9 el bloqueo 7 tampoco se reprodujo en 40 s con `PS2X_IRQDEFER=0` (la fuga
   cambia el timing), así que la evidencia de la resolución es el modelo (ninguna ejecución de
   handler en paralelo) más la ausencia del atasco, no un A/B determinista.
+
+## Detalle del bloqueo 9 — VIF que perdía UNPACK y VU1 heredado (sesión 10, decisión 20)
+
+- **Síntoma medido:** ~28 flips/s durante ~30 s y luego ~0-1 flip/s. El hilo principal queda en `di` dentro del
+  `Store32` a `D1_CHCR` (`0x48BB04`) rasterizando en SW hasta ~4 000 sprites/s (~500 Mpix/s de área). Esos sprites
+  traen `FRAME/TEST/ALPHA/TEX0` llenos de valores tipo float (`fpsm=0x1f`, `psm=0x3f`): el GS lee datos de vértice
+  como escrituras A+D, porque algunos `XGKICK` apuntan a datos en vez de a una etiqueta GIF.
+- **VU1:** todo el microcódigo de Warriors corría en el intérprete heredado de BT3 (su JIT y sus kernels nativos solo
+  cubren programas de BT3). Diferencial sobre ejecuciones capturadas del juego (mismo estado, memoria y código) frente
+  al VU1 exacto de upstream (`ps2xRecomp/ps2xRuntime/src/lib/vu`, el que god-of-war-recomp usa de referencia):
+  divergen en los 4 microprogramas medidos (p. ej. `0x1700` 0/17 iguales). El heredado no modela la visibilidad de VI
+  en los branches, la latencia de `ILW`, el `XGKICK` como transferencia PATH1 ni el pipeline de flags. Además corta
+  cada programa a 65 536 ciclos y lo deja a medias; en hardware el VIF espera al bit E.
+- **Decisión 20 (dev):** VU1 exacto de upstream. Target `ps2_vu1_upstream`: las fuentes del submódulo compiladas con
+  macros de renombrado (`VU1Interpreter`, `VU1State`, `GS`, `PS2Memory`, `GifPathId` → `Up*`) y cabeceras shim
+  (`src/lib/vu_upstream/shim`), más la fachada `include/runtime/ps2_vu1_upstream.h`. `VU1Interpreter::execute/resume`
+  delega en ella y ejecuta por tramos de 65 536 ciclos hasta el bit E (tope `PS2X_VU1_MAXCYCLES`, 16 M por defecto,
+  con aviso `[vu1up] … did not reach E`). Los paquetes PATH1 entran al GS por el mismo `submitGifPacket(Path1)`.
+  `PS2X_VU1_UPSTREAM=0` vuelve al intérprete heredado (A/B). Fork `feature/TWR-27-vu1-gow-fixes` (`7b4abbe`): fixes de
+  GoW sobre ese VU1 (`JR/JALR` leen el VI actual; errata del coeficiente t^7 del EFU). Upstream `main` = nuestra base
+  (`e563698`), sin correcciones VU1 más nuevas.
+- **VIF/DMA:** con el VU1 nuevo, el programa de setup/2D (`6e8f…`, `XGKICK vi14`) se desbocaba al reanudar por MSCNT:
+  leía el número de vértices del lote en `qw 1005` (`ILW.w vi11, 1005`) y encontraba `0xcff1`. La cabecera del lote
+  (`UNPACK V4-32` a `0x3eb..0x3ef`) se pisaba con un `UNPACK V4-5 ×178` a `0x2b2+TOPS` que daba la vuelta a la
+  memoria VU1. Ese UNPACK no existe: el programa lee cuatro flujos de 52 qwords desde TOP. Causa: el DMA en cadena
+  solo enviaba al VIF la mitad alta de la etiqueta (dos VIFcodes, `CHCR.TTE=1`) para las ids `CNT/NEXT/CALL/RET/END`,
+  no para `REF/REFS/REFE`. RenderWare pone en sus `REF` el `UNPACK` que consume los vértices referenciados, así que
+  los vértices se parseaban como VIFcodes. Upstream (`transferTagData`) y el hardware lo envían para toda etiqueta.
+- **A/B (45 s, SW):** con ambas correcciones, ~30 flips/s estables, aviso de autoguardado y pantalla de título, cero
+  errores de la VU1. Solo el arreglo DMA con el VU1 heredado (`PS2X_VU1_UPSTREAM=0`): ~30 flips/s pero imagen casi
+  negra (brillo máx. 4/255). Hacen falta las dos.
 
 ## Capa BT3 retirada en TWR-27
 

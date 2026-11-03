@@ -2,6 +2,9 @@
 #define PS2_VU1_H
 
 #include <cstdint>
+#include <memory>
+
+#include "runtime/ps2_vu1_upstream.h"   // [TWR-27 decision 20]
 
 class GS;
 class PS2Memory;
@@ -66,6 +69,10 @@ public:
 
 private:
     VU1State m_state;
+    // [TWR-27 decision 20] cycle-exact upstream VU1 (default; PS2X_VU1_UPSTREAM=0 = inherited interpreter).
+    std::shared_ptr<ps2x::vu1up::Engine> m_up;   // shared: the JIT verify path copies the interpreter
+    void runUpstream(bool fresh, uint8_t *vuCode, uint32_t codeSize, uint8_t *vuData, uint32_t dataSize,
+                     GS &gs, PS2Memory *memory, uint32_t startPC, uint32_t top, uint32_t itop);
 
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,

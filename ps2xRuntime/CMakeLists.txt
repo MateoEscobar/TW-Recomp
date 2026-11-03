@@ -755,6 +755,29 @@ src/lib/ui_sdl.cpp          # [C] ImGui platform glue on SDL2 (replaces rlImGui)
 
 # [TWR-29] The emulated IOP. PUBLIC: ps2_runtime.h includes ps2x/iop/iop_types.h, so every
 # consumer of the header (the runner, the panel) needs the include directory too.
+# [TWR-27 decision 20] Cycle-exact VU1 interpreter of upstream PS2Recomp (the reference VU1 of
+# god-of-war-recomp), built from the submodule with its class names renamed so it coexists with the
+# VU1 interpreter inherited from BT3-Recomp. Include order matters: shim first (stand-ins for the
+# upstream GS / PS2Memory / log headers), then the upstream headers, then ours (facade header only).
+set(PS2X_UPSTREAM_RUNTIME_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRecomp/ps2xRuntime)
+add_library(ps2_vu1_upstream STATIC
+    ${PS2X_UPSTREAM_RUNTIME_DIR}/src/lib/vu/ps2_vu1_core.cpp
+    ${PS2X_UPSTREAM_RUNTIME_DIR}/src/lib/vu/ps2_vu1_lower.cpp
+    ${PS2X_UPSTREAM_RUNTIME_DIR}/src/lib/vu/ps2_vu1_upper.cpp
+    src/lib/vu_upstream/vu1_upstream_facade.cpp
+)
+target_include_directories(ps2_vu1_upstream BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu_upstream/shim
+    ${PS2X_UPSTREAM_RUNTIME_DIR}/include
+    ${PS2X_UPSTREAM_RUNTIME_DIR}/src/lib/vu
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(ps2_vu1_upstream PRIVATE
+    VU1Interpreter=UpVu1Interpreter VU1State=UpVu1State GS=UpVu1GsSink
+    PS2Memory=UpVu1MemSink GifPathId=UpVu1GifPathId)
+target_compile_features(ps2_vu1_upstream PRIVATE cxx_std_20)
+set_target_properties(ps2_vu1_upstream PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(ps2_runtime PRIVATE ps2_vu1_upstream)
+
 target_link_libraries(ps2_runtime PUBLIC ps2x::iop)
 
 # Native Linux evdev reader for unmapped gamepads (xone driver).

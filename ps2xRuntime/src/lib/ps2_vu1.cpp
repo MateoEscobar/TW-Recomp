@@ -689,6 +689,8 @@ VU1Interpreter::VU1Interpreter()
 
 void VU1Interpreter::reset()
 {
+    if (m_up)
+        m_up->reset();
     std::memset(&m_state, 0, sizeof(m_state));
     m_state.vf[0][3] = 1.0f; // VF0.w = 1.0
     m_state.q = 1.0f;
@@ -895,12 +897,96 @@ namespace
     };
 }
 
+// [TWR-27 decision 20] The VU1 interpreter inherited from BT3-Recomp diverges from the cycle-exact
+// upstream interpreter on every Warriors microprogram (differential on captured runs: branch reads
+// of a VI written the pair before, ILW latency, XGKICK as a PATH1 transfer, flag pipeline). Its JIT
+// and native kernels only cover BT3 programs, so Warriors always ran on it and some XGKICKs pointed
+// at vertex data: the GS took those qwords as A+D writes (FRAME/TEST/ALPHA garbage) and rasterized
+// full-screen sprites at ~1 flip/s (bloqueo 9). The upstream VU1 -- the reference VU1 of
+// god-of-war-recomp -- now runs every program; PS2X_VU1_UPSTREAM=0 restores the inherited one.
+static bool vu1UpstreamEnabled()
+{
+    static const bool s_on = []() {
+        const char *v = std::getenv("PS2X_VU1_UPSTREAM");
+        const bool on = !(v && v[0] == '0');
+        std::fprintf(stderr, "[vu1up] VU1 interpreter: %s\n", on ? "upstream (cycle-exact)" : "inherited (PS2X_VU1_UPSTREAM=0)");
+        return on;
+    }();
+    return s_on;
+}
+
+namespace
+{
+    struct RuntimeKickSink final : ps2x::vu1up::KickSink
+    {
+        GS &gs;
+        PS2Memory *memory;
+        RuntimeKickSink(GS &g, PS2Memory *m) : gs(g), memory(m) {}
+        void kick(const uint8_t *data, uint32_t sizeBytes) override
+        {
+            vu1CapPacket(data, sizeBytes);   // [vu1cap]
+            if (memory)
+                memory->submitGifPacket(GifPathId::Path1, data, sizeBytes);
+            else
+                gs.processGIFPacket(data, sizeBytes);
+        }
+    };
+}
+
+void VU1Interpreter::runUpstream(bool fresh, uint8_t *vuCode, uint32_t codeSize, uint8_t *vuData, uint32_t dataSize,
+                                 GS &gs, PS2Memory *memory, uint32_t startPC, uint32_t top, uint32_t itop)
+{
+    if (!m_up)
+        m_up = std::make_shared<ps2x::vu1up::Engine>();
+    // On hardware the VIF waits for the running microprogram (MSCAL/MSCNT stall while VU1 is busy),
+    // so a program always reaches its E bit before the next one starts. Run in slices until it does;
+    // the cap only guards against a runaway program (logged, state kept like upstream).
+    static const uint32_t kSlice = 65536u;
+    static const uint64_t s_cap = []() {
+        const char *v = std::getenv("PS2X_VU1_MAXCYCLES");
+        return (v && v[0]) ? std::strtoull(v, nullptr, 0) : 16ull * 1024ull * 1024ull;
+    }();
+    const uint64_t gen = g_vu1CodeGen.load(std::memory_order_relaxed);
+    RuntimeKickSink sink(gs, memory);
+    g_curStartPc = startPC;
+    ps2x::vu1up::RunResult r = fresh
+        ? m_up->execute(vuCode, codeSize, vuData, dataSize, gen, sink, startPC, top, itop, kSlice)
+        : m_up->resume(vuCode, codeSize, vuData, dataSize, gen, sink, top, itop, kSlice);
+    uint64_t total = r.cycles;
+    while (!r.ended && total < s_cap)
+    {
+        r = m_up->resume(vuCode, codeSize, vuData, dataSize, gen, sink, top, itop, kSlice);
+        total += r.cycles;
+    }
+    ps2x::vu1up::Regs regs;
+    m_up->getRegs(regs);
+    if (!r.ended)
+    {
+        static std::atomic<uint32_t> s_warn{0};
+        if (s_warn.fetch_add(1) < 8u)
+            std::fprintf(stderr, "[vu1up] microprogram from pc=0x%x did not reach E in %llu cycles (stopped at pc=0x%x)\n",
+                         startPC, (unsigned long long)total, regs.pc);
+    }
+    // Mirror the architectural registers for readers of state() (debug panel, seam probes).
+    std::memcpy(m_state.vf, regs.vf, sizeof m_state.vf);
+    std::memcpy(m_state.vi, regs.vi, sizeof m_state.vi);
+    std::memcpy(m_state.acc, regs.acc, sizeof m_state.acc);
+    m_state.q = regs.q; m_state.p = regs.p; m_state.i = regs.i;
+    m_state.pc = regs.pc; m_state.mac = regs.mac; m_state.clip = regs.clip; m_state.status = regs.status;
+    m_state.top = top; m_state.itop = itop; m_state.ebit = false;
+}
+
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint8_t *vuData, uint32_t dataSize,
                              GS &gs, PS2Memory *memory,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+    if (vu1UpstreamEnabled())
+    {
+        runUpstream(true, vuCode, codeSize, vuData, dataSize, gs, memory, startPC & 0x3FFFu, top, itop);
+        return;
+    }
     VuRoundScope vuRound;
     m_state.pc = startPC & 0x3FFFu;
     m_state.ebit = false;
@@ -1078,6 +1164,11 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
                             GS &gs, PS2Memory *memory,
                             uint32_t top, uint32_t itop, uint32_t maxCycles)
 {
+    if (vu1UpstreamEnabled())
+    {
+        runUpstream(false, vuCode, codeSize, vuData, dataSize, gs, memory, m_state.pc, top, itop);
+        return;
+    }
     m_state.ebit = false;
     m_state.top = top;
     m_state.itop = itop;

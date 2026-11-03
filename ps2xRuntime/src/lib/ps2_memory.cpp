@@ -2379,10 +2379,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 }
                             }
                         }
+                        const bool isVifChannel = channelBase == 0x10009000u || channelBase == 0x10008000u;
                         const bool compactVifLocalTag =
-                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                        if (compactVifLocalTag && tteEnabled)
+                            isVifChannel && (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
+                        // [TWR-27 bloqueo 9] CHCR.TTE sends the DMAtag's upper 64 bits (two VIFcodes) to the
+                        // VIF for EVERY tag id, REF/REFS/REFE included -- as upstream (transferTagData) and
+                        // hardware do. The inherited code skipped them for REF/REFS/REFE: RenderWare's
+                        // REF tags carry the UNPACK that consumes the referenced vertices, so the vertices
+                        // were parsed as VIFcodes (phantom UNPACK V4-5 x178 that wrapped VU1 memory and
+                        // clobbered the batch header -> runaway clipper, garbage XGKICKs).
+                        if (isVifChannel && tteEnabled)
                             appendCompactVif1TagData(currentTagAddr, 0u);
 
                         if (hasPayload)
