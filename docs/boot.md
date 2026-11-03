@@ -59,7 +59,7 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 7 | Con datos GIF reales el hilo principal se queda para siempre en `0x48c5f0` (flush DMA de RW) a los ~3-5 s: `cnt=[gp-0x7608]=1`, `q0=[gp-0x7600]` **pasado** de `q1=[gp-0x75FC]` (q0 = q1 + 8), VIF1/GIF ociosos | **Resuelto** (sesión 9) | Runtime EE (a): los handlers de interrupción corrían en el worker de vblank en paralelo con el hilo guest que interrumpen; el handler DMAC `sub_0048B708` y el hilo principal (`sub_0048E048`, `handler(-1)` sin `di`) procesaban la misma entrada de la cola | Decisión 17: entrega de INTC/DMAC en checkpoints del hilo con el token (`eeCheckpointDue`, `dispatchGuestBranch`, despachadores, `Store32`); el worker solo marca causas y entrega él únicamente con la CPU ociosa (ver detalle) |
 | 8 | Sin atasco, `flips` sube y `prims/sec` llega a ~40 000, pero la pantalla sigue negra (`Mpix/sec=0`) y la RSS crece ~1 GB/s hasta agotar la RAM | **Resuelto** (sesión 9) | Render (d): el camino GPU estaba activo por defecto (`uiFlag("PS2X_GPU", true)` + `renderer = opengl` del overlay, que además pisaba `PS2X_GPU=0`). Su única publicación de frame era el kick de render de BT3 (`0x100ab8`), retirado en 3a: todo se grababa en `m_building`, nadie lo consumía, y el rasterizador SW no corría | Decisión 15 completada: software por defecto (`kRendererDefault = 1`, `PS2X_GPU` opt-in), `syncFromRuntime` coherente con el flag. Más: accesores VRAM por PSM a 64 entradas (índice `0x3F` fuera de rango → SIGSEGV en `sampleTexture`) |
 | 9 | Con el rasterizador SW hay imagen, pero incorrecta (rellenos de color sólido, diagonales, una franja de texto con texturas/CLUT mal decodificadas) y ~1-2 flips/s: el hilo principal pasa ~100 % en `0x48BB00` rasterizando dentro del kick síncrono de RW (en `di`) | **Resuelto** (sesión 10) | VIF/DMA (d) + VU1 (d), dos causas encadenadas (ver detalle): (9a) el DMA en cadena heredado no enviaba al VIF la mitad alta de las etiquetas `REF/REFS/REFE` con `CHCR.TTE=1`, así que el `UNPACK` que RW pone en esas etiquetas se perdía y los vértices se leían como VIFcodes; (9b) el intérprete VU1 heredado de BT3 diverge del VU1 exacto de upstream en todos los microprogramas de Warriors | (9a) tag-transfer para toda etiqueta VIF con `TTE` (como upstream); (9b) decisión 20: VU1 exacto de upstream vía adaptador (`ps2_vu1_upstream`) + fixes VU1 de GoW en el fork (`7b4abbe`). Resultado: aviso de autoguardado y pantalla de título, ~30 flips/s estables |
-| 10 | Pantalla de título visible pero con defectos: (10a) aviso de autoguardado y "PRESS THE START BUTTON" rotados 180°; (10b) 1 de cada ~4 glifos de "PRESS START" con ruido; (10c) falta la noria *Wonder Wheel* animada a la derecha (referencia: vídeos de la PS2 original) | 10a/10b **resueltos** (sesión 10), 10c **causa raíz resuelta** (sesión 11; queda 10d: la geometría no se ve) | Render (d): (10a) `drawSprite` SW intercambiaba posiciones sin UV; (10b) el GS aplicaba al vértice la Q de un ST PACKED al instante, cuando en el hardware solo la fija en el registro Q interno y la copia el siguiente RGBAQ. Los sprites de la fuente 2D llevan `ST RGBAQ XYZ2 ST XYZ2` y el segundo ST trae Q con memoria VU rancia; (10c) la geometría 3D de la noria (tiras texturizadas color 29,0,29, programa VU1 3D, entradas `0x0`/`0xf70`) llega al GS **colapsada**: casi todos los vértices en el centro de pantalla (320,224) → transformación 3D con matriz nula o incorrecta | (10a) UV intercambiadas junto con las posiciones; (10b) registro Q interno `m_stqQ` como PCSX2 (`0 → FLT_MIN`, `NaN → FLT_MAX`, reinicio por GIFtag) + Q plana del segundo vértice en sprites; (10c) pendiente: rastrear la matriz que recibe el programa 3D (sube por VIF desde el EE; revisar el cálculo en el EE con VU0/COP2) |
+| 10 | Pantalla de título visible pero con defectos: (10a) aviso de autoguardado y "PRESS THE START BUTTON" rotados 180°; (10b) 1 de cada ~4 glifos de "PRESS START" con ruido; (10c) falta la noria *Wonder Wheel* animada a la derecha (referencia: vídeos de la PS2 original) | 10a/10b **resueltos** (sesión 10), 10c **causa raíz resuelta** (sesión 11); 10d **diagnosticado** (sesión 12: distancia de dibujado adaptativa por FPS bajo, ver detalle) | Render (d): (10a) `drawSprite` SW intercambiaba posiciones sin UV; (10b) el GS aplicaba al vértice la Q de un ST PACKED al instante, cuando en el hardware solo la fija en el registro Q interno y la copia el siguiente RGBAQ. Los sprites de la fuente 2D llevan `ST RGBAQ XYZ2 ST XYZ2` y el segundo ST trae Q con memoria VU rancia; (10c) la geometría 3D de la noria (tiras texturizadas color 29,0,29, programa VU1 3D, entradas `0x0`/`0xf70`) llega al GS **colapsada**: casi todos los vértices en el centro de pantalla (320,224) → transformación 3D con matriz nula o incorrecta | (10a) UV intercambiadas junto con las posiciones; (10b) registro Q interno `m_stqQ` como PCSX2 (`0 → FLT_MIN`, `NaN → FLT_MAX`, reinicio por GIFtag) + Q plana del segundo vértice en sprites; (10c) pendiente: rastrear la matriz que recibe el programa 3D (sube por VIF desde el EE; revisar el cálculo en el EE con VU0/COP2) |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -165,9 +165,39 @@ Upstream tiene el mismo fallo.
 - Hallazgo lateral: la cámara del título se mueve al origen dos veces por frame (`sub_0040D0A8`: `0x40d234`,
   `0x40d3c8`) y se restaura después (`0x40d494`). Es diseño del juego, el patrón skybox, y no es un fallo.
 
-**Pendiente (10d):** tras el arreglo, la geometría llega al GS en la mitad derecha (x≈384–623, y≈57–420), pero no
-escribe píxeles visibles. Es PSMT4 texturizado, `TEST=0x5140b` (alpha test GEQUAL 0x40, FAIL=FB_ONLY; Z GEQUAL) y
-`ALPHA=0x44`. Rendimiento SW: ~11 flips/s (antes ~20–30), porque ahora se rasteriza la geometría 3D real.
+### Detalle del bloqueo 10d — la noria desaparece tras 5 frames (diagnosticado, sesión 12)
+
+**No es un fallo de píxeles.** La rueda solo se dibuja en ~5 flips (154–158) y después el juego deja de mandarla.
+Cadena verificada con sondas temporales y volcados de RAM (flip 157 frente al 210):
+
+1. La rueda son 3 clumps concéntricos (radios 21.3 / 16 / 10.8; átomos `0xb0a370`, `0xb0a410`, `0xb0a4b0`).
+   Su callback de render es `0x17fbf0` (del juego). Tras el flip ~158, el puntero `world` de los tres átomos pasa a 0 y
+   sus *ties* quedan vacíos: los clumps salen del `RpWorld` (`RpWorldRemoveClump` en `0x472ec0`).
+2. Los quita `sub_0017F9E8(obj, enMundo=0)`, llamado desde el update de entidad `sub_00395720` → `sub_003956C0` →
+   `sub_0018A5F0`. Es **culling por distancia** del juego: dentro del mundo solo si
+   `d² < (alcance + radio)²`, con `d² = min |pos − observador|²` (`func_120230`) y `alcance = cam+0x58`
+   (cámara `0xc05c00`).
+3. `d` es constante (~75.2). El alcance baja **150 → 123 → 94 → 66 → 50** en 5 frames y se queda en 50.
+4. Lo baja `sub_0040E8D8` (`0x40eb8c`…`0x40ec28`): **distancia de dibujado adaptativa por FPS**. Lee el FPS medido
+   `[0x50C680]` y lo compara con el objetivo 29.5 (24.5 con flag). Por encima, sube el alcance hasta 300; por debajo,
+   lo baja `(objetivo − fps)·10.5·dt` con mínimo 50. Con el SW a ~10 flips/s el juego recorta el alcance al mínimo y
+   la rueda (a 75 unidades) queda fuera.
+
+**Prueba (experimento temporal, no commiteado):** con el FPS medido forzado a 30 en `0x40eb8c`, la noria se dibuja en
+todos los frames y la captura coincide con la referencia del dev (`home.jpeg`): radios de neón rosa, bombillas,
+letrero "WONDER WHEEL" y estructura.
+
+**Descartado por el camino (verificado):**
+- Niebla: el SW no aplica `FGE` y descarta `FOGCOL`. Aquí `FOGCOL=0`, así que no influye en este bloqueo, pero es un
+  hueco real del GS SW.
+- CLUT: la de la estructura (`cbp=15164`) es `80000000` + 15 ceros **tal cual en `WARRIORS.WAD`** (`0x18d0d478`). La
+  estructura es una silueta negra, como en la consola.
+- La alternancia ocultar/mostrar de las 3 partes (matriz con `pos=−1e10`, `sub_00395720`, bit `0x4` en `entity+0x54`,
+  scripts `0x3ef1d0`) es del juego.
+
+**Consecuencia:** el siguiente bloqueo real es **rendimiento** (≥30 flips/s). Cualquier cosa que dependa de la
+distancia de dibujado (LOD, entidades, multitudes) se recortará mientras el render vaya lento. No se parchea la
+lógica del juego.
 
 ### Detalle del bloqueo 3c-bis — handlers DMAC reentrantes
 
