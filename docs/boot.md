@@ -179,6 +179,59 @@ Tres huecos del runtime, en el orden en que aparecieron:
 Resultado: `flips` pasa de 1 a ~1 500 en 50 s (~30/s) con `prims/sec ≈ 180` → Escenario 4 cumplido por
 log. Siguiente: bloqueo 5.
 
+## Detalle del bloqueo 5 — la carga se para con pantalla negra (TWR-27 sesión 6)
+
+**Síntomas.** ~30 flips/s y `prims/sec≈180` (unos 6 prims por frame: limpiar la pantalla), pero
+`Mpix/sec=0` y la ventana es negra de verdad: la captura nativa (`PS2X_SHOT_DIR=<dir>` + `touch
+<dir>/shot.req`, PNG de la ventana compuesta, sirve en Wayland) da 921 600 píxeles `(0,0,0)`.
+La caída a ~1 flip/s es intermitente: apareció en 1 de 2 corridas con los defaults de render de
+`main.cpp` y en ninguna de 4 con `PS2X_NODEFAULTS=1 PS2X_SCHED=1` (ver "Defaults de render
+heredados", abajo). Esa caída es secundaria. El bloqueo de fondo es el mismo en todas las corridas.
+
+**Qué hace el juego.** Pasa la comprobación de memory card: puerto 0 formateado, sin
+`BASLUS-21215/BASLUS-21215`, resultado -4. Después el hilo principal vive en el gestor de
+streaming/MultiStream del EE: `sub_00154D50` encola un comando de 0x54 bytes en `[obj+0x10]`
+y llama `0x154AE0` (el caliente `0x154e00` es su bucle de copia).
+
+**Qué hace el IOP.** `/proc/<pid>/io` muestra unos 19 MB leídos en los primeros ~10 s y **cero**
+después. `strace` lo confirma: las lecturas de `WARRIORS.WAD` van en bloques de 4 KB y se cortan.
+Las peticiones `cdvdman` de `IOP.IRX` son `sceCdSync` + `sceCdRead` de 0x13 sectores al búfer
+del canal 0 (`0x8d980`) y de 1 sector a `0x39180`. Cada una recibe su callback `0x221c8`.
+La última es siempre `sceCdRead(lsn=0x1fd8ea, 1)` (ISO virtual) y no hay excepción en el IOP.
+Mientras tanto el IOP lee sin parar los registros de dirección de voz del **SPU2**: unos 4 M de
+lecturas en 45 s, repartidas por igual con paso 0xC sobre `0x1F9001C0..` (core 0) y
+`0x1F9005C0..0x1F900740` (core 1), y siempre valen 0. MultiStream sondea la posición de
+reproducción (NAX) de las voces para saber cuánto consumió el SPU2 de cada búfer en anillo y
+pedir más datos. Sin SPU2 esa posición nunca avanza, el stream nunca se rellena ni termina y el
+EE espera la carga para siempre.
+
+**Clasificación (ADR D4/D5).** Subsistema (b) SIF/IOP, motivo **SPU2 ausente**. Es el punto de
+parada D5: hace falta un modelo mínimo de voces SPU2 (KON/KOFF, avance de NAX por bloques ADPCM
+según el pitch, flags de loop/end, ENDX e IRQ de dirección), sin mezcla ni salida de audio. Se
+construye en el fork `ps2xIOP` y TWR-30 lo extiende. **Pendiente de decisión del dev.**
+
+**Bug lateral corregido (fork `326683a`).** `ps2xIOP` cortaba **sin aviso** toda llamada
+síncrona al guest a los 2 M de instrucciones. El registro de SFX de MultiStream (handler RPC
+`0x275c0` → `GetSFXSlot` `0x2d0b4` → búsqueda en `0x2d020` sobre 512 SpotFX, O(n²)) lo
+superaba y quedaba a medias. Ahora el tope es 128 M (~3,5 s de IOP real) y llegar a él se
+registra como error `[IOP] guest call … cut after …`. Hay test (handler de ~9 M instrucciones).
+
+### Defaults de render heredados de BT3 (`main.cpp`, sin `PS2X_NODEFAULTS`)
+
+`main.cpp` activa por defecto unas 30 variables "validadas" para BT3: `PS2X_SCENESKIP`,
+`F336SKIP`, `SHCOMPSKIP` (índices de shaders de BT3), `MASKBUILDSKIP`, `BARGATE`, `IDXONLY`…,
+`PS2X_Warriors_CDTICK` y `PS2X_ASYNC_KICK=1`. Según su propio comentario, este último tiene
+carreras sin resolver. Ninguno está verificado contra Warriors. Para diagnosticar, arrancar
+con `PS2X_NODEFAULTS=1 PS2X_SCHED=1`. Retirarlos está pendiente de decisión del dev.
+
+### Herramientas de esta sesión
+
+- Captura de la ventana: `PS2X_SHOT_DIR` + `shot.req` (lo hace `ps2_runtime.cpp` `[shotreq]`).
+- E/S real: muestrear `/proc/<pid>/io` (`rchar`) y `strace -f -y -e trace=read,lseek,openat`.
+- Trazas temporales en el fork (no commiteadas): `cdvdman` en `dispatchImport`, entrega de
+  `servicePendingGuestCallbacks`, histograma de `IopMemory::readHardware32`. IRX: base de carga
+  `0x20700`; los offsets `lui 0x1 / lw 0x7474` del archivo se reubican a `0x30000 + 0x7b74`.
+
 ## Capa BT3 retirada en TWR-27
 
 - `game_overrides.cpp`: 12 registros (sound init bypass con los `ret1` de TWR-13 y el Fix A/B de
