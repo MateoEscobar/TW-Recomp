@@ -802,6 +802,22 @@ bool PS2IopHostAdapter::hasGuestRpcServer(uint32_t sid) const
     return sd && sd->func != 0u && m_runtime.hasFunction(sd->func);
 }
 
+bool PS2IopHostAdapter::awaitGuestRpcServer(uint32_t sid)
+{
+    // [TWR-27] An IRX is spinning in sceSifBindRpc on an EE server that is not registered yet.
+    // When that happens inside a synchronous EE->IOP call (m_activeContext set), the EE thread
+    // that issued the call is, on hardware, blocked in sceSifCallRpc -- and the EE scheduler runs
+    // the other threads, one of which registers the server. MultiStream does exactly this: its
+    // init command binds 0x12344321, which the EE's sound RPC thread registers. Without the
+    // hand-off the bind spins until ps2xIOP's call budget aborts the handler half-way.
+    if (!m_activeContext)
+    {
+        return false;
+    }
+    m_runtime.yieldToOtherGuestThreads();
+    return hasGuestRpcServer(sid);
+}
+
 bool PS2IopHostAdapter::callGuestRpc(uint32_t sid,
                                      uint32_t function,
                                      const void *send,

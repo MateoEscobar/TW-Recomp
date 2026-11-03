@@ -98,6 +98,7 @@ public:
     // IOP -> EE RPC: the IRX's sceSifBindRpc/sceSifCallRpc reach the servers the EE registered
     // with SifRegisterRpc (g_rpc_servers with func != 0, e.g. MultiStream's 0x12344321).
     bool hasGuestRpcServer(uint32_t sid) const override;
+    bool awaitGuestRpcServer(uint32_t sid) override;
     bool callGuestRpc(uint32_t sid,
                       uint32_t function,
                       const void *send,

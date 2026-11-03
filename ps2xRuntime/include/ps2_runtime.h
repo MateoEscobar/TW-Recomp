@@ -619,6 +619,10 @@ public:
     void drainCompletedDmacHandlers(uint8_t *rdram);
     bool shouldPreemptGuestExecution();
     void yieldGuestExecutionAfterWake();
+    // [TWR-27] The calling guest thread waits on something only another guest thread can
+    // produce (e.g. the emulated IOP polling for an EE RPC server during a synchronous
+    // sceSifCallRpc): hand the CPU to the other runnable guest threads once, then resume.
+    void yieldToOtherGuestThreads();
     // [eecheck] called at backward edges in generated code; yields the scheduler slice when enough
     // EE cycles have accumulated. Returns true to signal the dispatcher to re-enter at ctx->pc.
     bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
