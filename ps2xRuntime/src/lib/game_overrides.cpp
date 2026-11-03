@@ -35,8 +35,8 @@ extern std::atomic<uint64_t> g_vu1PairCount;    // [fightgate] VU1 instruction p
 extern std::atomic<uint64_t> g_seamHostChunks;  // [fightgate] the seam's host mesh chunks (ps2_seammesh.cpp): the fight's render work when its VU1 programs are skipped
 // [syncrelax] true while the frame gate is engaged (async kick on, gate on, worker frame > one vblank): the gate
 // then owns the frame rate, so the busy-bit pacing and the sceGsSyncPath drain can let the guest run ahead.
-std::atomic<bool> g_ps2xFrameGateHeavy{false};
-extern "C" bool ps2xFrameGateHeavy() { return g_ps2xFrameGateHeavy.load(std::memory_order_relaxed); }
+extern std::atomic<bool> g_ps2xFrameGateHeavy;   // [TWR-27] moved to ps2_frame_state.cpp
+
 
 // [guestbusy-tid] FILE SCOPE, not inside warriorsFrameKick. Declaring this extern "C" inside a function
 // body -- which sits in this file's anonymous namespace -- builds silently on Linux clang and
@@ -86,7 +86,7 @@ extern "C" const char *ps2xDropBoxDir()
 // func_356090 loads character select's assets on the confirm) -- this hides those frames instead
 // of pretending they are not needed. Counts DOWN in swapFrame so a failed transition cannot
 // freeze the picture forever.
-std::atomic<int> g_netJumpHold{0};
+extern std::atomic<int> g_netJumpHold;   // [TWR-27] moved to ps2_frame_state.cpp
 
 // [netjump] The overlay curtain's TARGET, not its level: 1 = cover the screen with black and show
 // "Loading..." while the transition runs, 0 = take it away again. The level lives with whoever
@@ -98,7 +98,7 @@ std::atomic<int> g_netJumpHold{0};
 // published, which freezes the picture on the main menu; this covers whatever is there with
 // something that says what is happening. Both are wanted: the hold is what keeps the versus menu
 // from being seen operated, the curtain is what the player looks at while it happens.
-std::atomic<int> g_netCurtainWant{0};
+extern std::atomic<int> g_netCurtainWant;   // [TWR-27] moved to ps2_frame_state.cpp
 
 
 #define XXH_INLINE_ALL
@@ -142,7 +142,7 @@ namespace ps2_stubs
 }
 
 // External-linkage game-frame counter (read by the [fps] line in ps2_runtime.cpp).
-std::atomic<uint64_t> g_warriorsFrameCount{0};
+extern std::atomic<uint64_t> g_warriorsFrameCount;   // [TWR-27] moved to ps2_frame_state.cpp
 uint64_t ps2FightTicks();                                       // [fighttick] ps2_stepcensus.cpp
 extern "C" void ps2xSeamTickMark(unsigned long long tick);      // [fighttick] ps2_seamgs.cpp
 
@@ -274,8 +274,8 @@ namespace
 }
 
 // [rumble] the launcher setting as PS2SettingsOverlay::applySettings pushes it; read by warriorsPadSendRumble every frame
-std::atomic<bool> g_ps2xRumbleOn{true};
-std::atomic<int> g_ps2xRumbleStrength{100};
+extern std::atomic<bool> g_ps2xRumbleOn;   // [TWR-27] moved to ps2_frame_state.cpp
+extern std::atomic<int> g_ps2xRumbleStrength;   // [TWR-27] moved to ps2_frame_state.cpp
 
 namespace ps2_game_overrides
 {
@@ -549,10 +549,8 @@ extern "C" void ps2xNetMenuGate(int on, int allowMask)
 // [netmenu] True only while the NET entry owns the screen. The [slot-read] trace keys off it, so
 // the log stays clean: it shows the reads that happen because the net entry was pressed.
 std::atomic<int> g_netEntryActive{0};
-extern "C" void ps2xNetEntrySetActive(int on)
-{ g_netEntryActive.store(on ? 1 : 0, std::memory_order_relaxed); }
-extern "C" int ps2xNetEntryActive()
-{ return g_netEntryActive.load(std::memory_order_relaxed); }
+// [TWR-27] moved to ps2_bt3_inert.cpp: ps2xNetEntrySetActive
+// [TWR-27] moved to ps2_bt3_inert.cpp: ps2xNetEntryActive
 
 // [netmenu] Drive the game's OWN SE playback from the host menu (no decoded WAVs).
 // The guest-side sePlay() needs rdram + runtime; warriorsFrameKick() stashes them every frame.
@@ -562,7 +560,7 @@ PS2Runtime *g_ps2xMenuRuntime = nullptr;
 // so the menu's effects play through the game's own mixer. Read by PS2AudioBackend.
 std::atomic<int> g_ps2xSeMenuBypass{0};
 extern "C" void ps2xSeMenuBypass(int on) { g_ps2xSeMenuBypass.store(on ? 1 : 0, std::memory_order_relaxed); }
-extern "C" int ps2xSeMenuBypassGet() { return g_ps2xSeMenuBypass.load(std::memory_order_relaxed); }
+// [TWR-27] moved to ps2_bt3_inert.cpp: ps2xSeMenuBypassGet
 
 std::atomic<int> g_netServeSwapActive{0};
 std::atomic<uint64_t> g_netServeSwapSlot{0};
@@ -620,48 +618,16 @@ extern "C" void ps2xNetServeMuteSlots(const char *csv)
     g_netServeMuteN.store(n, std::memory_order_relaxed);
     std::fprintf(stderr, "[netmenu] serve-swap: muting %d other BGM slot(s): %s\n", n, csv ? csv : "");
 }
-extern "C" int ps2xNetServeSwapRead(unsigned long long slotId, unsigned long long off,
-                                    unsigned char *dst, unsigned long long n)
-{
-    if (g_netServeSwapActive.load(std::memory_order_relaxed) == 0 || !dst)
-        return 0;
-    // [netmenu] The swap slot AND every "muted" slot are served the SAME image -- a valid silent
-    // stream. Serving raw zeros here produced decoder NOISE, not silence.
-    bool useImage = (slotId == g_netServeSwapSlot.load(std::memory_order_relaxed));
-    if (!useImage)
-    {
-        const int mn = g_netServeMuteN.load(std::memory_order_relaxed);
-        for (int i = 0; i < mn; ++i)
-            if (slotId == g_netServeMuteSlots[i]) { useImage = true; break; }
-    }
-    if (!useImage)
-        return 0;
-    static std::atomic<uint64_t> s_hits{0};
-    const uint64_t hit = s_hits.fetch_add(1, std::memory_order_relaxed);
-    if (hit < 12)
-        std::fprintf(stderr, "[netmenu] serve-swap HIT #%llu slot=%llu off=%llu n=%llu\n",
-                     hit, slotId, off, n);
-    const std::vector<uint8_t> &img = *g_netServeSwapData;
-    if (off >= img.size())
-        std::memset(dst, 0, static_cast<size_t>(n));
-    else
-    {
-        const size_t avail = static_cast<size_t>(std::min<unsigned long long>(img.size() - off, n));
-        std::memcpy(dst, img.data() + static_cast<size_t>(off), avail);
-        if (avail < n) std::memset(dst + avail, 0, static_cast<size_t>(n - avail));
-    }
-    return 1;
-}
+// [TWR-27] moved to ps2_bt3_inert.cpp: ps2xNetServeSwapRead
     // [statesync] 0 = no jump this session, 1 = jumping, 2 = settled / gave up. The state sync waits for
     // 2 on both sides: the host publishes AFTER its jump (so the joiner adopts character select), the
     // joiner adopts only once its own jump has it in the same screen (comparable call chains).
     std::atomic<int> g_netJumpState{0};
     std::atomic<uint32_t> g_netJumpSession{0};   // the netplay session the state belongs to
-    extern "C" int ps2xNetJumpState() { return g_netJumpState.load(std::memory_order_relaxed); }
+    // [TWR-27] moved to ps2_bt3_inert.cpp: ps2xNetJumpState
     // True once THIS session's jump has settled (or given up). A session the jump has not looked at yet
     // (it runs from the frame hook, after the boundary that first sees the peer) counts as not settled.
-    extern "C" int ps2xNetJumpSettledFor(uint32_t session)
-    { return g_netJumpSession.load(std::memory_order_relaxed) == session && g_netJumpState.load(std::memory_order_relaxed) == 2; }
+    // [TWR-27] moved to ps2_bt3_inert.cpp: ps2xNetJumpSettledFor
 
     void writeNeutralPadPacket(uint8_t *rdram, uint32_t bufAddr, uint32_t socket)
     {
@@ -1883,126 +1849,15 @@ extern "C" int ps2xNetServeSwapRead(unsigned long long slotId, unsigned long lon
 // Called from SIF.cpp for every DMA into the SE sample staging area. Each upload is snapshotted
 // in order, because the staging address is REUSED: without this, bank B's 656 KB overwrites
 // bank A's 35 KB and every bank-A sample decodes from the wrong bytes.
-void warriorsNoteSeBankBlob(const uint8_t *data, uint32_t size)
-{
-    if (!data || !size)
-        return;
-    std::lock_guard<std::mutex> lk(g_seBlobM);
-    if (g_sePendingBlob.empty())
-    {
-        // A blob with no header waiting for it. Never seen in any captured session; log it
-        // rather than guess a slot, because guessing is how the wrong character ends up talking.
-        std::fprintf(stderr, "[se] bank blob (%u bytes) with no header awaiting it -- DROPPED\n",
-                     size);
-        return;
-    }
-    const uint32_t slot = g_sePendingBlob.front();
-    g_sePendingBlob.erase(g_sePendingBlob.begin());
-    g_seSlot[slot].blob.assign(data, data + size);
-    std::fprintf(stderr, "[se] bank blob -> slot %u (%u bytes)\n", slot, size);
-}
+// [TWR-27] moved to ps2_bt3_inert.cpp: warriorsNoteSeBankBlob
 
 // Called from SIF.cpp for every DMA into the IOP sound region. A bank's header is uploaded
 // before its sample blob, so recording the Vagi-bearing ones in order keeps header slot N
 // paired with blob N. Sequence (Sequ/Sesq) uploads share the SCEI container but carry no Vagi
 // chunk, and must not be counted or every slot after the first would be off by one.
-void warriorsNoteSeBankHeader(uint32_t dst, const uint8_t *data, uint32_t size)
-{
-    if (!data || size < 24u)
-        return;
-    // Find the Vagi chunk and read its SAMPLE COUNT -- that count is the bank's identity.
-    bool hasVagi = false;
-    uint32_t vagiCount = 0u;
-    for (uint32_t o = 0, guard = 0; o + 12u <= size && guard < 16u; ++guard)
-    {
-        uint32_t magic, tag, len;
-        std::memcpy(&magic, data + o, 4);
-        std::memcpy(&tag, data + o + 4, 4);
-        std::memcpy(&len, data + o + 8, 4);
-        if (magic != 0x53434549u || !len) // 'SCEI'
-            break;
-        if (tag == 0x56616769u) // 'Vagi'
-        {
-            hasVagi = true;
-            if (o + 16u <= size)
-                std::memcpy(&vagiCount, data + o + 12u, 4);
-            break;
-        }
-        o += len;
-    }
-    if (!hasVagi)
-        return;
-    std::lock_guard<std::mutex> lk(g_seBlobM);
+// [TWR-27] moved to ps2_bt3_inert.cpp: warriorsNoteSeBankHeader
 
-    // [sebankid] The slot comes from WHAT THE BANK IS, not from its position in the upload group.
-    //
-    // Position was the first attempt and it is wrong: a group is NOT always five banks. Observed
-    // two shapes, both real --
-    //     boot + fight:   79, 84, 10, 56, 56   (five)
-    //     another fight:  79,     10, 56, 56   (four -- no 84-sample common-SFX bank)
-    // -- so counting arrivals slid the two per-character banks down into slots 3 and 4, and the
-    // game asking for bank bit 16/32 got the wrong bank entirely. Reported as a character voice
-    // looping (the fly-up call-out repeating), because a sample index resolved inside a bank that
-    // was never meant to answer it.
-    //
-    // The Vagi sample count identifies each fixed bank uniquely, and the per-character banks are
-    // the only pair that collides -- they are told apart by group order, which is the one thing
-    // position IS reliable for.
-    uint32_t slot;
-    const char *why;
-    switch (vagiCount)
-    {
-        case 8u:  slot = 0u; g_sePerChar = 4u; why = "menu/system, 8"; break;
-        case 79u: slot = 1u; g_sePerChar = 4u; why = "system SE, 79"; break;
-        case 84u: slot = 2u; g_sePerChar = 4u; why = "common fight SFX, 84"; break;
-        case 10u: slot = 3u; g_sePerChar = 4u; why = "10-sample"; break;
-        default:
-            // Anything else is a per-character bank (56 in every bank seen, but a character with
-            // a different count must still land in 4 then 5 rather than be dropped).
-            why = "per-character";
-            // [sebankaddr] A TRANSFORMATION re-uploads the fighter's voice bank mid-fight to the SAME
-            // header address its original bank used (SSJ Goku's bank at 0x129880 = base Goku's slot 4;
-            // seen 2026-09-17 in every replay). The group counter cannot know that and filed it as a
-            // third per-character bank -> slot 5 -> the OPPONENT spoke with P1's transformed voice.
-            // Within a fight the header address IS the identity of a per-character bank: reuse that slot.
-            slot = kSeSlots;
-            for (uint32_t k = 4u; k < kSeSlots; ++k)
-                if (!g_seSlot[k].hdr.empty() && g_seSlot[k].addr == dst) { slot = k; why = "per-character, same address = same fighter"; break; }
-            if (slot < kSeSlots)
-            {
-            }
-            else if (g_sePerChar < kSeSlots)
-            {
-                slot = g_sePerChar++;   // 4, then 5
-            }
-            else
-            {
-                // A THIRD per-character bank in one group. The cursor is one PAST slot 5 by then,
-                // so this is the real over-run -- comparing against kSeSlots-1 instead made the
-                // legitimate SECOND bank warn on every single fight.
-                slot = kSeSlots - 1u;
-                std::fprintf(stderr, "[se] WARNING a third per-character bank (%u samples) in one "
-                                     "group -- slot 5 overwritten, mapping may be off\n", vagiCount);
-            }
-            break;
-    }
-    const bool reload = !g_seSlot[slot].hdr.empty();
-    // Same-slot reloads should keep the same sample count. If one changes, the identity table
-    // above no longer matches this build of the game -- say so loudly rather than quietly playing
-    // the wrong sound, which is the failure this whole path exists to prevent.
-    if (reload && g_seSlotCount[slot] != vagiCount)
-        std::fprintf(stderr, "[se] WARNING slot %u sample count changed %u -> %u\n",
-                     slot, g_seSlotCount[slot], vagiCount);
-    g_seSlot[slot].addr = dst;
-    g_seSlot[slot].hdr.assign(data, data + size);
-    g_seSlot[slot].blob.clear();   // the old blob belongs to the bank being replaced
-    g_seSlotCount[slot] = vagiCount;
-    g_sePendingBlob.push_back(slot);
-    std::fprintf(stderr, "[se] bank header -> slot %u at 0x%x (%u bytes, %u samples: %s)%s\n",
-                 slot, dst, size, vagiCount, why, reload ? " [reload]" : "");
-}
-
-std::atomic<int> g_rayHookArm{0};   // [rayhook] external linkage: set by the [raysrc] probe in ps2_memory.cpp
+extern std::atomic<int> g_rayHookArm;   // [TWR-27] moved to ps2_frame_state.cpp
 namespace
 {
     // Locate the Vagi chunk in a SNAPSHOTTED bank header; offsets are snapshot-relative.
@@ -3779,22 +3634,7 @@ namespace
     // [dispatchpump] when the CD server last ran (any path); the dispatch-loop pump only fires when this is stale
     static std::atomic<int64_t> g_lastCdTickNs{0};
     static std::atomic<uint64_t> g_lastCdTickFrame{~0ull};   // [detsound]
-    extern "C" bool ps2xCdTickStale(unsigned ms)
-    {
-        // [detsound] Deterministic pacing. Gating the disc pump on ELAPSED MILLISECONDS makes the
-        // number of CD ticks per frame depend on how fast this machine is, so disc data lands at
-        // different rates on two machines -- measured as the 12 bytes that differ at boot frame 1,
-        // all of them stream-position counters. Under PS2X_DETSOUND the pump fires exactly once
-        // per guest frame instead, which is identical everywhere.
-        if (ps2xDetPacing())
-        {
-            const uint64_t fr = g_warriorsFrameCount.load(std::memory_order_relaxed);
-            return g_lastCdTickFrame.load(std::memory_order_relaxed) != fr;
-        }
-        const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        const int64_t last = g_lastCdTickNs.load(std::memory_order_relaxed);
-        return last == 0 || (now - last) > (int64_t)ms * 1000000LL;
-    }
+    // [TWR-27] moved to ps2_bt3_inert.cpp: ps2xCdTickStale
     extern "C" int ps2xSchedTraceOn();
     extern "C" int ps2xSchedTid();
     extern "C" int ps2xSchedTraceOn();
@@ -3846,31 +3686,11 @@ namespace
     // Hardware preempts the poller with the IOP completion. Emulate it: tick the server here, then
     // yield the guest token so a woken loader thread can run. PS2X_SPINPUMP=0 disables.
     // [dispatchpump] tick the CD file server WITHOUT sleeping (the dispatch-loop pump runs during fights too)
-    extern "C" void ps2xCdTickOnly(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        if (!runtime || !runtime->hasFunction(0x0028a3b0u)) return;
-        Bt3CdTickGuard tickGuard;
-        if (tickGuard.engaged) { warriorsRunCdTickInline(rdram, ctx, runtime); s_warriorsCdTicking = false; }
-    }
+    // [TWR-27] moved to ps2_bt3_inert.cpp: ps2xCdTickOnly
     extern "C" void *ps2xGuestWaitBegin();
     extern "C" void ps2xGuestWaitEnd(void *);
     extern "C" void ps2xGuestSleepMs(unsigned ms);   // [fibers] parks the guest fiber, not the host thread
-    extern "C" void ps2xSpinPump(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        static const bool s_on = [](){ const char *v = std::getenv("PS2X_SPINPUMP"); return !(v && v[0] == '0'); }();
-        if (!s_on || !runtime || !runtime->hasFunction(0x0028a3b0u)) return;
-        {
-            Bt3CdTickGuard tickGuard;
-            if (tickGuard.engaged) { warriorsRunCdTickInline(rdram, ctx, runtime); s_warriorsCdTicking = false; }
-        }
-        static std::atomic<uint32_t> s_n{0};
-        const uint32_t k = s_n.fetch_add(1u);
-        if (k < 6u || (k % 5000u) == 0u)
-            std::fprintf(stderr, "[spinpump] guest thread spinning at pc 0x%x: ticked the CD server + yielded (x%u)\n", ctx->pc, k + 1u);
-        void *scope = ps2xGuestWaitBegin();
-        ps2xGuestSleepMs(1u);   // [fibers] a host sleep here would stop the very threads the CD tick serves
-        ps2xGuestWaitEnd(scope);
-    }
+    // [TWR-27] moved to ps2_bt3_inert.cpp: ps2xSpinPump
 
     PS2Runtime::RecompiledFunction g_orig26b900 = nullptr;
     void warriorsAfsStatusPoll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // FUN_0026b900
@@ -4460,7 +4280,7 @@ namespace
             std::fprintf(stderr, "[fixupring]   #%u a0=0x%x a1=0x%x a2=0x%x ra=0x%x count=%u entOff=0x%x sp=0x%x\n", r.n, r.a0, r.a1, r.a2, r.ra, r.cnt, r.entOff * 4u, r.sp);
         }
     }
-    extern "C" void ps2xFixupRingDump() { warriorsFixupRingDumpImpl(); }
+    // [TWR-27] moved to ps2_bt3_inert.cpp: ps2xFixupRingDump
     PS2Runtime::RecompiledFunction g_orig2722c0 = nullptr;
     // [vstep] PS2X_VSTEP=<n>: override the fight loop's hard-coded frame step (0x12bce4 passes a0=2 to
     // func_102060 -> func_23D160 (30 Hz counter cadence) and func_264D98 (wait until the per-frame vblank
@@ -5597,154 +5417,16 @@ namespace
         Bt3DevDoneSer devSlots[8] = {};   // [statesync] the CD device-done latches (warriorsCdStateEdge)
     };
     static void snapCopy(std::vector<uint8_t> &dst, const uint8_t *src, size_t n) { dst.resize(n); if (n) std::memcpy(dst.data(), src, n); }
-    extern "C" void *ps2xSimSnapCapture(PS2Runtime *runtime, uint8_t *rdram)
-    {
-        SimSnap *s = new SimSnap();
-        PS2Memory &mem = runtime->memory();
-        s->frame = g_warriorsFrameCount.load(std::memory_order_relaxed);
-        s->rand64 = ps2_stubs::ps2RandState(); s->randCalls = ps2_stubs::ps2RandCallCount();
-        snapCopy(s->ram, rdram, PS2_RAM_SIZE);
-        if (uint8_t *sp = ps2GetScratchpadHostPtr()) snapCopy(s->sp, sp, PS2_SCRATCHPAD_SIZE);
-        snapCopy(s->iop,  mem.getIOPRAM(),  2u * 1024u * 1024u);
-        snapCopy(s->vu0d, mem.getVU0Data(), PS2_VU0_DATA_SIZE);
-        snapCopy(s->vu1d, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
-        snapCopy(s->vram, mem.getGSVRAM(),  PS2_GS_VRAM_SIZE);
-        snapCopy(s->vu0c, mem.getVU0Code(), PS2_VU0_CODE_SIZE);
-        snapCopy(s->vu1c, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
-        s->v0 = runtime->vu0().state(); s->v1 = runtime->vu1().state();
-        {
-            std::lock_guard<std::mutex> lk(g_iopSinkM);
-            for (const auto &kv : g_iopSinks)
-            {
-                const IopSink &v = kv.second;
-                s->sinks.push_back(SinkSer{ kv.first, v.streamId, v.returnedBytes, v.heldBytes, v.wallBaseBytes,
-                                            v.frameBase, v.frameBaseBytes, (uint8_t)v.wallClock, (uint8_t)v.ringFullIdle,
-                                            (uint8_t)v.frameClock, 0u });
-            }
-        }
-        gsRegPack(mem.gs(), s->gs);
-        { std::lock_guard<std::mutex> lk(g_seVoiceM); s->seVoices = g_seVoices; }
-        { std::lock_guard<std::mutex> lk(g_iopSinkM); s->sinksFull = g_iopSinks; }
-        { std::lock_guard<std::mutex> lk(g_sinkRingM); s->rings = g_sinkRings; s->pairSink[0] = g_pairSink[0]; s->pairSink[1] = g_pairSink[1];
-          s->pairReturns[0] = g_pairReturns[0]; s->pairReturns[1] = g_pairReturns[1]; }
-        { std::lock_guard<std::mutex> lk(g_streamStartM); s->streamStart = g_streamStart; }
-        { std::lock_guard<std::mutex> lk(g_sndRateM); s->rateLast = g_sndRateLast; }
-        s->seTickBase = g_seTickBase; s->seTickCarry = g_seTickCarry;
-        warriorsDevSlotsCapture(s->devSlots);
-        return s;
-    }
-    extern "C" bool ps2xSimSnapRestore(void *h, PS2Runtime *runtime, uint8_t *rdram)
-    {
-        const SimSnap *s = static_cast<const SimSnap *>(h);
-        if (!s || s->ram.size() != PS2_RAM_SIZE) return false;
-        PS2Memory &mem = runtime->memory();
-        std::memcpy(rdram, s->ram.data(), PS2_RAM_SIZE);
-        if (uint8_t *sp = ps2GetScratchpadHostPtr()) if (s->sp.size() == PS2_SCRATCHPAD_SIZE) std::memcpy(sp, s->sp.data(), PS2_SCRATCHPAD_SIZE);
-        std::memcpy(mem.getIOPRAM(),  s->iop.data(),  s->iop.size());
-        std::memcpy(mem.getVU0Data(), s->vu0d.data(), s->vu0d.size());
-        std::memcpy(mem.getVU1Data(), s->vu1d.data(), s->vu1d.size());
-        std::memcpy(mem.getGSVRAM(),  s->vram.data(), s->vram.size());
-        std::memcpy(mem.getVU0Code(), s->vu0c.data(), s->vu0c.size());
-        std::memcpy(mem.getVU1Code(), s->vu1c.data(), s->vu1c.size());
-        runtime->vu0().state() = s->v0; runtime->vu1().state() = s->v1;
-        {
-            const auto now = std::chrono::steady_clock::now();
-            std::lock_guard<std::mutex> lk(g_iopSinkM);
-            for (const SinkSer &ss : s->sinks)
-            {
-                IopSink &d = g_iopSinks[ss.key];
-                d.streamId = ss.streamId; d.returnedBytes = ss.returnedBytes; d.heldBytes = ss.heldBytes;
-                d.wallBaseBytes = ss.wallBaseBytes; d.frameBase = ss.frameBase; d.frameBaseBytes = ss.frameBaseBytes;
-                d.wallClock = ss.wallClock != 0; d.ringFullIdle = ss.ringFullIdle != 0; d.frameClock = ss.frameClock != 0;
-                d.wallBase = now; d.ringFullSince = now;
-            }
-        }
-        gsRegUnpack(s->gs, mem.gs());
-        { std::lock_guard<std::mutex> lk(g_seVoiceM); g_seVoices = s->seVoices; }
-        { std::lock_guard<std::mutex> lk(g_iopSinkM); g_iopSinks = s->sinksFull; }   // exact clocks, no re-anchoring
-        { std::lock_guard<std::mutex> lk(g_sinkRingM); g_sinkRings = s->rings; g_pairSink[0] = s->pairSink[0]; g_pairSink[1] = s->pairSink[1];
-          g_pairReturns[0] = s->pairReturns[0]; g_pairReturns[1] = s->pairReturns[1]; }
-        { std::lock_guard<std::mutex> lk(g_streamStartM); g_streamStart = s->streamStart; }
-        { std::lock_guard<std::mutex> lk(g_sndRateM); g_sndRateLast = s->rateLast; }
-        g_seTickBase = s->seTickBase; g_seTickCarry = s->seTickCarry;
-        warriorsDevSlotsRestore(s->devSlots);
-        g_warriorsFrameCount.store(s->frame, std::memory_order_relaxed);
-        ps2_stubs::ps2RandRestore(s->rand64, s->randCalls);
-        return true;
-    }
-    extern "C" void ps2xSimSnapFree(void *h) { delete static_cast<SimSnap *>(h); }
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapCapture
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapRestore
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapFree
     // [statesync] Portable form of the simulation snapshot (same binary on both ends: PODs go raw;
     // the sound HLE's time points are on the virtual clock in stepped mode, so they travel as ns).
-    extern "C" bool ps2xSimSnapSerialize(const void *h, std::vector<uint8_t> &out)
-    {
-        const SimSnap *s = static_cast<const SimSnap *>(h);
-        if (!s) return false;
-        Ps2xByteW w(out);
-        w.u32(0x53494d31u);   // 'SIM1'
-        w.u64(s->frame); w.u64(s->rand64); w.u32(s->randCalls);
-        w.bytes(s->ram); w.bytes(s->sp); w.bytes(s->iop); w.bytes(s->vu0d); w.bytes(s->vu1d); w.bytes(s->vram); w.bytes(s->vu0c); w.bytes(s->vu1c);
-        w.pod(s->v0); w.pod(s->v1);
-        w.podVec(s->sinks);
-        w.pod(s->gs);
-        w.u64(s->seVoices.size());
-        for (const SeVoice &v : s->seVoices) { w.u32(v.serial); w.podVec(v.pcm); w.u64(v.pos); }
-        w.u64(s->sinksFull.size());
-        for (const auto &kv : s->sinksFull)
-        {
-            const IopSink &v = kv.second;
-            w.u32(kv.first); w.u32(v.streamId); w.u64(v.returnedBytes); w.u64(v.heldBytes); w.u8(v.wallClock); w.tp(v.wallBase);
-            w.u64(v.wallBaseBytes); w.u8(v.ringFullIdle); w.tp(v.ringFullSince); w.u8(v.frameClock); w.u64(v.frameBase); w.u64(v.frameBaseBytes);
-        }
-        w.u64(s->rings.size());
-        for (const auto &kv : s->rings) { w.u32(kv.first); w.podVec(kv.second.bufs); w.u64(kv.second.next); }
-        w.u32(s->pairSink[0]); w.u32(s->pairSink[1]); w.u64(s->pairReturns[0]); w.u64(s->pairReturns[1]);
-        w.u64(s->streamStart.size()); for (const auto &kv : s->streamStart) { w.u32(kv.first); w.tp(kv.second); }
-        w.u64(s->rateLast.size());    for (const auto &kv : s->rateLast)    { w.u32(kv.first); w.tp(kv.second); }
-        w.u64(s->seTickBase); w.u64(s->seTickCarry);
-        w.raw(s->devSlots, sizeof s->devSlots);
-        w.u32(0x53494d45u);   // 'SIME'
-        return true;
-    }
-    extern "C" void *ps2xSimSnapDeserialize(const uint8_t *data, size_t n, size_t *used)
-    {
-        Ps2xByteR r(data, n);
-        if (r.u32() != 0x53494d31u) return nullptr;
-        SimSnap *s = new SimSnap();
-        s->frame = r.u64(); s->rand64 = r.u64(); s->randCalls = r.u32();
-        r.bytes(s->ram); r.bytes(s->sp); r.bytes(s->iop); r.bytes(s->vu0d); r.bytes(s->vu1d); r.bytes(s->vram); r.bytes(s->vu0c); r.bytes(s->vu1c);
-        s->v0 = r.pod<VU1State>(); s->v1 = r.pod<VU1State>();
-        r.podVec(s->sinks);
-        s->gs = r.pod<GsRegSer>();
-        { const size_t k = r.count(4); s->seVoices.resize(r.ok ? k : 0);
-          for (SeVoice &v : s->seVoices) { v.serial = r.u32(); r.podVec(v.pcm); v.pos = (size_t)r.u64(); } }
-        { const size_t k = r.count(8);
-          for (size_t i = 0; i < k && r.ok; ++i)
-          {
-              const uint32_t key = r.u32(); IopSink &v = s->sinksFull[key];
-              v.streamId = r.u32(); v.returnedBytes = r.u64(); v.heldBytes = r.u64(); v.wallClock = r.u8() != 0; v.wallBase = r.tp();
-              v.wallBaseBytes = r.u64(); v.ringFullIdle = r.u8() != 0; v.ringFullSince = r.tp(); v.frameClock = r.u8() != 0; v.frameBase = r.u64(); v.frameBaseBytes = r.u64();
-          } }
-        { const size_t k = r.count(8);
-          for (size_t i = 0; i < k && r.ok; ++i) { const uint32_t key = r.u32(); SinkRing &ring = s->rings[key]; r.podVec(ring.bufs); ring.next = (size_t)r.u64(); } }
-        s->pairSink[0] = r.u32(); s->pairSink[1] = r.u32(); s->pairReturns[0] = r.u64(); s->pairReturns[1] = r.u64();
-        { const size_t k = r.count(12); for (size_t i = 0; i < k && r.ok; ++i) { const uint32_t key = r.u32(); s->streamStart[key] = r.tp(); } }
-        { const size_t k = r.count(12); for (size_t i = 0; i < k && r.ok; ++i) { const uint32_t key = r.u32(); s->rateLast[key] = r.tp(); } }
-        s->seTickBase = r.u64(); s->seTickCarry = r.u64();
-        r.raw(s->devSlots, sizeof s->devSlots);
-        if (r.u32() != 0x53494d45u || !r.ok || s->ram.size() != PS2_RAM_SIZE) { delete s; return nullptr; }
-        if (used) *used = (size_t)(r.p - data);
-        return s;
-    }
-    extern "C" const uint8_t *ps2xSimSnapRam(const void *h) { const SimSnap *s = static_cast<const SimSnap *>(h); return s && s->ram.size() == PS2_RAM_SIZE ? s->ram.data() : nullptr; }
-    extern "C" uint64_t ps2xSimSnapFrame(const void *h) { const SimSnap *s = static_cast<const SimSnap *>(h); return s ? s->frame : 0u; }
-    extern "C" uint64_t ps2xRamHash(const uint8_t *rdram, uint32_t skipLo, uint32_t skipHi)
-    {   // 64-bit FNV-1a over 8-byte words (~10 ms for 32 MB), optionally skipping [skipLo, skipHi)
-        uint64_t h = 1469598103934665603ull;
-        const uint64_t *w = reinterpret_cast<const uint64_t *>(rdram);
-        const size_t lo = skipLo / 8u, hi = skipHi / 8u;
-        for (size_t i = 0; i < PS2_RAM_SIZE / 8u; ++i) { if (i >= lo && i < hi) continue; h ^= w[i]; h *= 1099511628211ull; }
-        return h;
-    }
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapSerialize
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapDeserialize
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapRam
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xSimSnapFrame
+    // [TWR-27] moved to ps2_simsnap.cpp: ps2xRamHash
 
     // [memwatch] PS2X_MEMWATCH=<hex>[,<hex>...] -- print these EE words whenever any of them
     // changes. Built to verify the RetroAchievements-documented menu variables against this

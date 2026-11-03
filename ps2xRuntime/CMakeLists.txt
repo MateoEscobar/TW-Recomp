@@ -709,6 +709,8 @@ src/lib/ps2x_injected.cpp       # [injected] function registry for cloned guest 
     src/lib/ps2_stepcensus.cpp
     src/lib/ps2_diag_env.cpp    # [TWR-27] env-armed generic diagnostics, any ELF
     src/lib/ps2_frame_state.cpp # [TWR-27] game-independent frame counters (display flips)
+    src/lib/ps2_simsnap.cpp     # [TWR-27] machine snapshot for rollback/state sync (moved from game_overrides)
+    src/lib/ps2_bt3_inert.cpp   # [TWR-27] neutral entry points of inert BT3 subsystems (docs/boot.md)
     src/lib/ps2_seamprobe.cpp   # [seamprobe] Phase 0 of docs/NATIVE-RENDER-SEAM.md
     src/lib/ps2_seammesh.cpp    # [seam] Phases 1-3: importer, host transform, verify/skip
     src/lib/ps2_fiber.cpp
