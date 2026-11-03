@@ -707,6 +707,8 @@ src/lib/ps2x_mainmenu.cpp       # [mainmenu] the main-menu lifecycle gate (start
 src/lib/ps2x_injected.cpp       # [injected] function registry for cloned guest code
     src/lib/ps2_eeprof.cpp
     src/lib/ps2_stepcensus.cpp
+    src/lib/ps2_diag_env.cpp    # [TWR-27] env-armed generic diagnostics, any ELF
+    src/lib/ps2_frame_state.cpp # [TWR-27] game-independent frame counters (display flips)
     src/lib/ps2_seamprobe.cpp   # [seamprobe] Phase 0 of docs/NATIVE-RENDER-SEAM.md
     src/lib/ps2_seammesh.cpp    # [seam] Phases 1-3: importer, host transform, verify/skip
     src/lib/ps2_fiber.cpp

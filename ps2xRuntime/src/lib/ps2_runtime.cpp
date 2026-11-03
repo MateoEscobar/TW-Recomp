@@ -1507,6 +1507,7 @@ bool PS2Runtime::syncCoreSubsystems()
 
 bool PS2Runtime::initialize(const char *title)
 {
+    ps2DiagEnvApply();   // [TWR-27] PS2X_STEPCENSUS/ADDRWATCH/STORETRACE/HALFSTEP for any ELF
     // PS2X_GWATCH_LO/HI (hex): arm the guest write-watch on an arbitrary region from
     // startup — reports every recompiled store into it as [camwrite] with pc/ra.
     // Implies keep-zero-writes (the never-written-matrix hunts need them).
@@ -8120,6 +8121,9 @@ void PS2Runtime::run()
                 extern std::atomic<uint64_t> g_warriorsFrameCount;
                 static uint64_t s_lastGameFrames = 0u;
                 uint64_t gameFrames = g_warriorsFrameCount.load(std::memory_order_relaxed);
+                extern std::atomic<uint64_t> g_ps2DisplayFlips;   // [TWR-27] ps2_frame_state.cpp
+                static uint64_t s_lastFlips = 0u;
+                const uint64_t flips = g_ps2DisplayFlips.load(std::memory_order_relaxed);
                 extern std::atomic<uint64_t> g_guestBusyNs, g_guestBusyFrames, g_guestWallNs;
                 static uint64_t s_lastBusyNs = 0, s_lastBusyFrames = 0, s_lastWallNs = 0;
                 const uint64_t bn = g_guestBusyNs.load(std::memory_order_relaxed), bf = g_guestBusyFrames.load(std::memory_order_relaxed);
@@ -8167,6 +8171,7 @@ void PS2Runtime::run()
                     if (ps2xLogLevel() >= 1)   // [loglevel] OFF means silent
                     o << "[fps] GAME=" << (double)((gameFrames - s_lastGameFrames) / dt)
                       << " gframe=" << g_warriorsFrameCount.load(std::memory_order_relaxed)   // [dumpkey] the game frame at this line: maps a replay's shots/dumps to the game's own counter
+                      << " flips=" << flips << " flips/sec=" << (double)((flips - s_lastFlips) / dt)   // [TWR-27] DISPFB1 changes: the game-independent frame metric (ADR D2)
                       << " guest_ms=" << guestMs
                       << " wall_ms=" << wallMs
                       << " host=" << (uint32_t)(s_fpsFrames / dt)
@@ -8264,6 +8269,7 @@ void PS2Runtime::run()
                     s_lastTsc = tsc;
                 }
                 s_lastGameFrames = gameFrames;
+                s_lastFlips = flips;
                 s_lastPrims = prims;
                 s_lastPix = pix;
                 s_lastSwaps = swaps;

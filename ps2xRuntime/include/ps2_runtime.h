@@ -276,6 +276,8 @@ extern std::atomic<uint64_t> g_ps2HalfStepLogicFrame;   // render frame of the l
 uint32_t ps2HalfStepWrite(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint32_t value, const R5900Context *ctx);
 void ps2HalfStepWrite128(uint8_t *rdram, uint32_t guestAddr, uint64_t &lo, uint64_t &hi, const R5900Context *ctx);   // sqc2: 4 float lanes
 void ps2HalfStepEnable(const char *sitesPath);
+// [TWR-27] arms PS2X_STEPCENSUS/ADDRWATCH/STORETRACE/HALFSTEP for any ELF (ps2_diag_env.cpp)
+void ps2DiagEnvApply();
 void ps2HalfStepFrame(const R5900Context *ctx);
 
 inline void ps2TraceGuestWrite(uint8_t *rdram,

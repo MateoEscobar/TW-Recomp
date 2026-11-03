@@ -7727,10 +7727,6 @@ namespace
         // Camera view-matrix builder probe (PS2X_CAMPROBE).
         // Demo scene-tree recursion-depth guard: default ON (prevents the cyclic-tree stack
         // overflow crash). Disable with PS2X_NO_DEMO_GUARD. The PS2X_DEMOPROBE dump rides on it.
-        if (const char *sc = std::getenv("PS2X_STEPCENSUS"); sc && sc[0]) ps2StepCensusEnable(sc);   // [stepcensus]
-        if (const char *aw = std::getenv("PS2X_ADDRWATCH"); aw && aw[0]) ps2AddrWatchEnable(aw);   // [addrwatch]
-        if (const char *st = std::getenv("PS2X_STORETRACE"); st && st[0]) ps2StoreTraceEnable(st);   // [storetrace]
-        if (const char *hs = std::getenv("PS2X_HALFSTEP"); hs && hs[0]) ps2HalfStepEnable(hs);        // [halfstep]
         if (true)
         {   // [vstep] [logicrate] [fps60] hooks are always installed so the overlay toggle needs no restart
             g_orig102060 = runtime.lookupFunction(0x00102060u);
@@ -8254,21 +8250,14 @@ namespace
                       << std::endl;
     }
 
-    PS2_REGISTER_GAME_OVERRIDE("RECVX sound-driver compat", "slus_201.84", 0u, 0u, &applyRecvxSoundDriverCompat);
-    PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
-    PS2_REGISTER_GAME_OVERRIDE("LotR sound RPC compat", "SLUS_205.78", 0u, 0u, &applyLotrSoundRpcCompat);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors sound init bypass", "SLUS_212.15", 0u, 0u, &applyBt3SoundInitBypass);
     // [TWR-29] "Warriors DTX sound URPC compat" (applyBt3DtxCompat) is no longer registered:
     // the game's IOP.IRX (Sony MultiStream, SID 0x12345) now runs on the emulated IOP and the
     // DTX layer in RPC.cpp/SIF.cpp must stay inert (dtxCompat.isConfigured() == false). The
     // layer itself is removed with the EE-side audio path in TWR-30/31.
-    PS2_REGISTER_GAME_OVERRIDE("Warriors sceMpeg callback stubs", "SLUS_212.15", 0u, 0u, &applyBt3MpegCallbackStubs);
     // [modules] The same, registered for the install's renamed boot ELF. The matcher keys on the
     // ELF's BASENAME and every Warriors descriptor carries crc32 = 0, so the name is the only criterion --
     // an install that ships the ELF as data/Modules/BOOT would otherwise lose all of them with no
     // error at all. One descriptor matches either name (the other `continue`s), so nothing applies twice.
-    PS2_REGISTER_GAME_OVERRIDE("Warriors sound init bypass", "BOOT", 0u, 0u, &applyBt3SoundInitBypass);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors sceMpeg callback stubs", "BOOT", 0u, 0u, &applyBt3MpegCallbackStubs);
     // [nullpkt] The infinite-loading freeze: func_114860 (texture-packet address patcher) is
     // called with a NULL packet list (a1 = [obj+0x2C] not populated yet) and walks it as a
     // linked list from address 0 -- on hardware address 0 aliases the kernel's exception-vector
@@ -8346,13 +8335,9 @@ namespace
         if (g_orig113478 && runtime.replaceFunction(0x00113478u, &warriorsNullListGuard113478))
             std::cerr << "[game_overrides] Warriors: NULL list guard on sub_113478 (waits for the loader)" << std::endl;
     }
-    PS2_REGISTER_GAME_OVERRIDE("Warriors NULL packet-list guard", "SLUS_212.15", 0u, 0u, &applyBt3NullPacketGuard);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors CD read-state edge guard", "SLUS_212.15", 0u, 0u, &applyBt3CdStateEdge);
     // [modules] ...and for the renamed boot ELF, same reasoning as the three above. These two are the
     // ones whose absence is a real gameplay bug rather than a cosmetic one: the NULL packet-list guard
     // is the infinite-loading freeze, and the CD read-state guard is a load-time edge case.
-    PS2_REGISTER_GAME_OVERRIDE("Warriors NULL packet-list guard", "BOOT", 0u, 0u, &applyBt3NullPacketGuard);
-    PS2_REGISTER_GAME_OVERRIDE("Warriors CD read-state edge guard", "BOOT", 0u, 0u, &applyBt3CdStateEdge);
 
     // ─── The Warriors (SLUS_212.15) ──────────────────────────────────────────────
     //
@@ -8372,7 +8357,12 @@ namespace
             std::cerr << "[game_overrides] TW Warriors: IOP/MSS boot bypass on sub_339A20 (0x339a20)" << std::endl;
     }
 
-    PS2_REGISTER_GAME_OVERRIDE("TW Warriors IOP boot bypass", "SLUS_212.15", 0u, 0u, &applyTwWarriorsBootBypass)
+
+    // [TWR-27] Only the renderer init stays registered for Warriors. Every other override in this file
+    // was inherited from BT3-Recomp and hooks BT3 ELF addresses (88/92 are not function starts in
+    // SLUS_212.15); they are no longer registered and are deleted in the follow-up commit. The
+    // generic diagnostics (PS2X_STEPCENSUS/ADDRWATCH/STORETRACE/HALFSTEP) are armed for any ELF by
+    // ps2DiagEnvApply() (ps2_diag_env.cpp) from PS2Runtime::initialize().
 
     // [TWR-14] RW renderer init — called at boot to bring up the OpenGL renderer infrastructure.
     // RW function addresses for replaceFunction hooks will be wired once Ghidra pattern-matching

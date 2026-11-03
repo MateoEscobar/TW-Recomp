@@ -1057,6 +1057,7 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
 // Carry it through the kick queue: the worker applies the flip latch in stream order.
 extern "C" void ps2xSeamFlipStamp(unsigned long long gameFrame, unsigned long long fightTick);   // [fighttick] ps2_seamgs.cpp
 extern std::atomic<uint64_t> g_warriorsFrameCount;   // game_overrides.cpp
+extern std::atomic<uint64_t> g_ps2DisplayFlips;      // [TWR-27] ps2_frame_state.cpp
 uint64_t ps2FightTicks();   // ps2_stepcensus.cpp
 static void ps2xDispFlipInStream(PS2Memory *mem, uint64_t dispfb)
 {
@@ -1108,7 +1109,11 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             const bool changed = (newVal != *reg);
             *reg = newVal;
             ps2x_pgs::privWrite(regOff, newVal, &gs_regs);   // [pgs]
-            if (regOff == 0x70u) ps2xDispFlipInStream(this, newVal);   // [displatch] DISPFB1
+            if (regOff == 0x70u)
+            {
+                if (changed) g_ps2DisplayFlips.fetch_add(1u, std::memory_order_relaxed);   // [TWR-27] ADR D2
+                ps2xDispFlipInStream(this, newVal);   // [displatch] DISPFB1
+            }
             ps2xPrivInStream(this, regOff, newVal);   // [s1fence]
             // DISPFB1 (offset 0x0070) changed => the game swapped display buffers,
             // i.e. the just-rendered frame is complete. Snapshot it now.
@@ -1169,9 +1174,14 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
+            const bool changed = (value != *reg);
             *reg = value;
             ps2x_pgs::privWrite(regOff, value, &gs_regs);   // [pgs]
-            if (regOff == 0x70u) ps2xDispFlipInStream(this, value);   // [displatch] DISPFB1
+            if (regOff == 0x70u)
+            {
+                if (changed) g_ps2DisplayFlips.fetch_add(1u, std::memory_order_relaxed);   // [TWR-27] ADR D2
+                ps2xDispFlipInStream(this, value);   // [displatch] DISPFB1
+            }
             ps2xPrivInStream(this, regOff, value);   // [s1fence]
         }
         return;

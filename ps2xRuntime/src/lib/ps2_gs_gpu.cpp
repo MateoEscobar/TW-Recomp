@@ -3671,7 +3671,12 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     }
     case 0x59:
         if (m_privRegs)
+        {
+            // [TWR-27] a sceGs stub's DISPFB1 write is a presented frame too (ADR D2)
+            extern std::atomic<uint64_t> g_ps2DisplayFlips;
+            if (m_privRegs->dispfb1 != value) g_ps2DisplayFlips.fetch_add(1u, std::memory_order_relaxed);
             m_privRegs->dispfb1 = value;
+        }
         // A DISPFB1 write = a buffer flip. Publish the just-completed frame HERE (aligned
         // to the real flip, not the mid-frame render-kick) and tell the renderer which
         // buffer the CRT now scans out (DISPFB1.FBP, 2048-word pages). One published
