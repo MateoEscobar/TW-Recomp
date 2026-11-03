@@ -74,19 +74,18 @@ contra el código desensamblado.
 
 ---
 
-### 3. Miles Sound System (AIL_xxx) — 0 identificadas automáticamente
+### 3. Audio: Sony MultiStream 7.1 (no Miles Sound System — corregido en TWR-28/TWR-27)
 
-**El JAL scanner no encontró ninguna función con prefijo MSS/AIL.**  
-Mismo motivo que RenderWare: librería propietaria, símbolos stripped.
+**El JAL scanner no encontró ninguna función con prefijo MSS/AIL** porque el juego no usa Miles:
+el EE enlaza la librería `SOUND_*` de Sony MultiStream y el IOP ejecuta `MODULES/IOP.IRX`
+(MultiStream `Stream.C`), con canal RPC SID `0x12345`.
 
 **Formato de audio del disco:**
-- `IOP/BFW.SND` — efectos (~1.31 GB, formato Miles Sound System propietario)
-- `IOP/MUSIC.SND` — música (~0.89 GB, formato Miles Sound System propietario)
+- `IOP/BFW.SND` — efectos (~1.31 GB, stream MultiStream, bloques ADPCM PS2)
+- `IOP/MUSIC.SND` — música (~0.89 GB, stream MultiStream, bloques ADPCM PS2)
 
-**Acción requerida (TWR-17):** reverse engineering de la interfaz `AIL_xxx`
-desde el ELF. Buscar patrones de llamada a funciones IOP de audio y crossreferir
-con la documentación pública de MSS 6.x (plataforma PS2, 2004-2005).
-Backend de reemplazo propuesto: `miniaudio` o `OpenAL`.
+**Estrategia (ADR TWR-28):** se ejecuta el `IOP.IRX` real en `ps2xIOP` (TWR-29); el audio audible
+llega con la emulación del SPU2 (TWR-30). No se stubea la librería `SOUND_*` del EE (ver `docs/iop.md`).
 
 ---
 

@@ -50,9 +50,8 @@ stubs = [
   # "RwCameraShowRaster@0x00XXXXXX",
   # "RpWorldRender@0x00XXXXXX",
 
-  # Miles Sound System — to be filled after TWR-13 analysis
-  # "AIL_init_sample@0x00XXXXXX",
-  # "AIL_start_sample@0x00XXXXXX",
+  # Audio: Sony MultiStream 7.1. The EE side (SOUND_* library) runs recompiled and talks to the
+  # game's MODULES/IOP.IRX on the emulated IOP (ps2xIOP, RPC SID 0x12345) -- no stubs here.
 
   # PS2 SDK (sceXxx) — to be filled after TWR-8 analysis
   # "scePadRead@0x00XXXXXX",

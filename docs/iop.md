@@ -66,6 +66,12 @@ borrada en este ticket) resolvían eso de forma escalable.
   registró con `SifRegisterRpc` (p. ej. `0x12344321` de MultiStream) y ejecuta `sd->func(fno, buf, size)`.
   Log: `[ps2xIOP] ee-rpc sid=… fn=…`.
 
+## Boot del juego con el IOP real (TWR-27)
+
+Desde TWR-27 no hay ningún bypass de sonido ni de boot del lado EE: la librería `SOUND_*` del juego
+habla con el `IOP.IRX` real. La cadena de bloqueos que va apareciendo, su causa y su corrección, y
+el método para diagnosticarlos sin stubs están en [`docs/boot.md`](boot.md).
+
 ## Orden de carga (boot de Warriors)
 
 `SIO2MAN.IRX`, `PADMAN.IRX`, `LIBSD.IRX`, `IOP.IRX` (MultiStream), `MCMAN.IRX`, `MCSERV.IRX` — log

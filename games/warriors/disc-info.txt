@@ -28,8 +28,8 @@ Disc Structure
 ├── WARRIORS.DIR           128,428 bytes   — Game data directory/index
 ├── WARRIORS.WAD     1,495,371,776 bytes   — Main game data archive (~1.39 GB)
 ├── IOP/                                   — IOP audio data
-│   ├── BFW.SND      1,402,861,568 bytes   — Sound effects bank (~1.31 GB, Miles Sound System)
-│   └── MUSIC.SND      960,063,488 bytes   — Music bank (~0.89 GB, Miles Sound System)
+│   ├── BFW.SND      1,402,861,568 bytes   — Sound effects bank (~1.31 GB, Sony MultiStream stream, PS2 ADPCM)
+│   └── MUSIC.SND      960,063,488 bytes   — Music bank (~0.89 GB, Sony MultiStream stream, PS2 ADPCM)
 ├── MODULES/                               — IOP kernel modules (IRX)
 │   ├── IOP.IRX              143,132 bytes
 │   ├── IOPRP300.IMG         275,345 bytes
@@ -64,4 +64,5 @@ TWR-13 (stubs):        IRX module list above shows the IOP services in use
                        (LIBSD=sound, MCMAN/MCSERV=memory card, PADMAN=gamepad, SIO2MAN=SIO2 bus)
 TWR-16 (cutscenes):    videos are Bink Video (.BIK), NOT PSS/STR — use Bink SDK or RAD tools,
                        or a FOSS Bink decoder (e.g. FFmpeg libavcodec bink decoder)
-TWR-17 (audio):        audio data is in IOP/BFW.SND and IOP/MUSIC.SND (Miles Sound System format)
+TWR-17 (audio):        audio data is in IOP/BFW.SND and IOP/MUSIC.SND, streamed by MODULES/IOP.IRX
+                       (Sony MultiStream 7.1, EE<->IOP RPC SID 0x12345; corrected in TWR-28/TWR-27)
