@@ -6404,9 +6404,15 @@ void GSRasterizer::drawSprite(GS *gs)
     int y1 = static_cast<int>(v1.y) - ofy;
     u32 z1 = static_cast<u32>(v1.z);
 
-    if (x0 > x1)
+    // [TWR-27 bloqueo 10] Each texture coordinate belongs to its vertex: when the vertices arrive
+    // right-to-left / bottom-to-top the UVs must swap with the positions (as the GPU sprite path in
+    // this file and the GS do), otherwise the texture comes out mirrored --
+    // the autosave notice and "PRESS THE START BUTTON" were drawn rotated 180 degrees.
+    const bool swapX = x0 > x1;
+    const bool swapY = y0 > y1;
+    if (swapX)
         std::swap(x0, x1);
-    if (y0 > y1)
+    if (swapY)
         std::swap(y0, y1);
 
     const int unclippedX0 = x0;
@@ -6482,6 +6488,10 @@ void GSRasterizer::drawSprite(GS *gs)
             u1f = (v1.s / q1) * static_cast<float>(texW);
             v1f = (v1.t / q1) * static_cast<float>(texH);
         }
+        if (swapX)
+            std::swap(u0f, u1f);
+        if (swapY)
+            std::swap(v0f, v1f);
 
         float spriteW = static_cast<float>(spanX);
         float spriteH = static_cast<float>(spanY);
