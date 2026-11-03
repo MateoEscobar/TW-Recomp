@@ -22,6 +22,11 @@ jobs:
         with:
           submodules: recursive
 
+      # [TWR-27] Every hooked guest address must be a Warriors function start (ADR TWR-27 D3).
+      - name: Check hooked guest addresses
+        if: runner.os == 'Linux'
+        run: python3 tools/check_override_addresses.py
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
