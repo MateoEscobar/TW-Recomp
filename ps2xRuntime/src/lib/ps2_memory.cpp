@@ -540,6 +540,41 @@ extern "C" uint64_t ps2xVirtualClockGet() { return g_vclockNs; }
 extern "C" bool ps2xVirtualClockOn() { return g_vclockOn; }
 extern "C" void ps2xVirtualClockSet(uint64_t ns) { g_vclockNs = ns; }
 
+// [TWR-27] COP0 Count: 294,912 MHz sobre el mismo reloj que los timers EE (steadyClockNs, que
+// en modo frame-stepped es el reloj virtual). Época = primera lectura; un mtc0 Count fija un
+// desplazamiento global, igual que en el hardware (un único registro para todos los hilos).
+namespace
+{
+    constexpr uint64_t kEeCpuClockHz = 294912000ull;
+    std::atomic<uint64_t> g_cop0CountEpochNs{0};
+    std::atomic<uint32_t> g_cop0CountBias{0};
+
+    uint32_t cop0CountTicks() noexcept
+    {
+        const uint64_t nowNs = steadyClockNs();
+        uint64_t epochNs = g_cop0CountEpochNs.load(std::memory_order_relaxed);
+        if (epochNs == 0u)
+        {
+            uint64_t expected = 0u;
+            epochNs = g_cop0CountEpochNs.compare_exchange_strong(expected, nowNs, std::memory_order_relaxed)
+                          ? nowNs
+                          : expected;
+        }
+        const uint64_t ns = nowNs > epochNs ? nowNs - epochNs : 0u;
+        const uint64_t ticks = (ns / kNanosecondsPerSecond) * kEeCpuClockHz +
+                               ((ns % kNanosecondsPerSecond) * kEeCpuClockHz) / kNanosecondsPerSecond;
+        return static_cast<uint32_t>(ticks);
+    }
+}
+extern "C" uint32_t ps2xCop0CountRead() noexcept
+{
+    return cop0CountTicks() + g_cop0CountBias.load(std::memory_order_relaxed);
+}
+extern "C" void ps2xCop0CountWrite(uint32_t value) noexcept
+{
+    g_cop0CountBias.store(value - cop0CountTicks(), std::memory_order_relaxed);
+}
+
 // [rollback] The device state PS2Memory keeps outside guest memory: the I/O register file (EE
 // timers, INTC, DMAC, SIF...), the timers' clock bookkeeping, pending DMA completions, the PATH3
 // mask and its parked FIFO, the VIF1 image-transfer carry, and the virtual clock. Pending GIF/VIF

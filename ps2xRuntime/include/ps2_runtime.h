@@ -55,6 +55,27 @@ enum PS2Exception
 };
 
 // PS2 CPU context (R5900)
+// [TWR-27] COP0 Count (registro 9): contador libre a la frecuencia del EE (294,912 MHz).
+// En el hardware es un registro global de la CPU que avanza solo; el código recompilado
+// lo lee como `ctx->cop0_count` (mfc0) y nada lo incrementaba, así que los relojes del
+// juego basados en Count (The Warriors: bucle principal 0x148C90 vía 0x148FC8) quedaban
+// congelados en 0. El envoltorio conserva el layout de 32 bits del contexto y deriva el
+// valor del mismo reloj que los timers EE (ps2_memory.cpp, respeta el reloj virtual).
+extern "C" uint32_t ps2xCop0CountRead() noexcept;
+extern "C" void ps2xCop0CountWrite(uint32_t value) noexcept;
+struct Ps2Cop0CountReg
+{
+    uint32_t lastWritten; // solo para layout/diagnóstico; el valor vivo es global
+    operator uint32_t() const noexcept { return ps2xCop0CountRead(); }
+    Ps2Cop0CountReg &operator=(uint32_t value) noexcept
+    {
+        lastWritten = value;
+        ps2xCop0CountWrite(value);
+        return *this;
+    }
+};
+static_assert(sizeof(Ps2Cop0CountReg) == sizeof(uint32_t), "COP0 Count debe conservar el layout");
+
 struct alignas(16) R5900Context
 {
     // General Purpose Registers (128-bit)
@@ -115,7 +136,7 @@ struct alignas(16) R5900Context
     uint32_t cop0_pagemask;
     uint32_t cop0_wired;
     uint32_t cop0_badvaddr;
-    uint32_t cop0_count;
+    Ps2Cop0CountReg cop0_count; // [TWR-27] ver Ps2Cop0CountReg
     uint32_t cop0_entryhi;
     uint32_t cop0_compare;
     uint32_t cop0_status;

@@ -751,7 +751,7 @@ namespace
                         cpu.cop0_status,
                         cpu.cop0_cause,
                         cpu.cop0_epc,
-                        cpu.cop0_count,
+                        static_cast<uint32_t>(cpu.cop0_count),
                         cpu.cop0_compare,
                         cpu.cop0_badvaddr);
         }

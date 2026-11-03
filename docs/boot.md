@@ -45,7 +45,8 @@ PS2X_CD_IMAGE="<ruta al ISO>" ./build/ps2xRuntime/ps2EntryRunner games/warriors/
 |---|---|---|---|---|
 | 1 | Hilo principal en `0x154b50` (`sub_00154AE0`, `ra=0x154d1c`) x200 000 | **Desaparece** al desregistrar la capa BT3 (commit `55da112b`) | Pendiente de aislar qué override BT3 lo producía (bisección de los 12 registros retirados, sub-fase 3b) | Retiro de la capa BT3 |
 | 2 | Hilo principal en `0x47dd70` (`ra=0x47dd90`, `a1=a2=0x2000010`), `flips=0` | **Resuelto** (3b) | Runtime EE (a): `SetupHeap` recortaba el heap del kernel a `0x01F00000`; el juego pide `0x715b60..0x1FF0004` y reserva toda la RAM libre con un `malloc` (ver detalle) | Mapa de memoria `[hiarena]` (`ps2_memory.h`) + `SetupHeap`/`EndOfHeap` con semántica de kernel |
-| 3 | Bucle de frame en `0x148D10` con `sceGsSyncV` (~60/s), `flips=0`, `prims/sec=0` | **Abierto** (3b/3c) | — | — |
+| 3a | Bucle de frame en `0x148D10` con `sceGsSyncV` (~60/s), `flips=0`: el reloj del juego no avanza (`now=0`) | **Resuelto** (3b) | Runtime EE (a): `mfc0 Count` se traduce a `ctx->cop0_count` y nada incrementaba ese registro (ni aquí ni en el runtime upstream) | `COP0 Count` global a 294,912 MHz sobre el reloj de los timers EE (`Ps2Cop0CountReg`, `ps2xCop0CountRead/Write`) |
+| 3b | Mismo bucle con el reloj ya en marcha: el callback de frame `[0x50B728]` sigue en NULL, `flips=0` | **Abierto** (3b/3c) | Pendiente: `sub_001458D8` (setter) solo lo llaman `0x1612B0`/`0x161378`/`0x40E2D8` desde `sub_0015FE90` (gestor de flujo), que no se ejecuta | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -73,6 +74,23 @@ devuelven el heap del kernel tal como lo pide el juego (`[start, start+size)`, o
 con `size = −1`), acotado a 32 MB. Con 32 MB de respaldo se conserva el layout anterior. Resultado:
 `[SetupHeap] kernel heap 0x715b60..0x1ff0004`, `RwEngineInit/Open/Start` devuelven 1 y el hilo
 principal llega al bucle de frame (bloqueo 3).
+
+### Detalle del bloqueo 3a — `COP0 Count` congelado
+
+`sub_00148C90` es el bucle principal: `isDone` virtual (`0x148C38`) → `update` del gestor global
+`[0x50BCE4]` (`0x14C140`) → `sceGsSyncV(0)` (`func_4AA9F0`, `ra=0x148d10`) → lee el reloj del juego
+(objeto `[0x50B8B8]`, `vtbl+0x34 = 0x4DCDD8` = ciclos / `0x48000`, es decir ms) y, cuando pasan
+`[0x50B720] = 67` ms desde `[0x50B72C]`, llama `0x1454A8` y el callback de frame `[0x50B728]` si no es
+NULL. Los ciclos salen de `0x148FD8` → `0x148FC8` = `mfc0 $v0, Count`. El recompilador traduce eso a
+`ctx->cop0_count` y ningún código lo incrementaba: `now` valía 0 siempre y el bucle nunca entraba al
+frame.
+
+Corrección (runtime, sin tocar el juego): `cop0_count` pasa a ser un `Ps2Cop0CountReg` (mismo layout de
+32 bits) cuya lectura devuelve un contador **global** a 294,912 MHz derivado de `steadyClockNs()` (el
+mismo reloj de los timers EE, que en modo frame-stepped es el reloj virtual) y cuya escritura (`mtc0
+Count`) fija un desplazamiento global, como el registro real. No hace falta regenerar el runner: los 4
+lectores (`0x148FC8`, `0x48B708`, `0x48BDB0`, `0x4CD3D0`) usan el campo tal cual. Verificado: `now`
+avanza en ms (0 → 58 082 en ~58 s).
 
 ## Capa BT3 retirada en TWR-27
 
