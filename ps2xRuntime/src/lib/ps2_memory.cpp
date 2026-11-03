@@ -1533,6 +1533,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
             }
 
+            // [TWR-27] Scratchpad DMA (ch 8 fromSPR / ch 9 toSPR), ported from upstream PS2Recomp. The
+            // runtime inherited from BT3 never moved these bytes: The Warriors' RenderWare builds its GIF
+            // packets in SPR and copies them to the RAM DMA list with fromSPR, so VIF1 read a list that
+            // held only the CPU-written DMA tags (zero GIF data -> no visible primitive, black screen).
+            if (tryProcessScratchpadDma(channelBase, value))
+            {
+                return true;
+            }
+
             if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) &&
                 (m_gsVRAM || channelBase == 0x10008000u))
             {
@@ -3247,6 +3256,82 @@ void PS2Memory::processPendingTransfers()
         m_ioRegisters[VIF1_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[VIF1_CHANNEL + 0x20] = 0;
     }
+}
+
+bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+{
+    static constexpr uint32_t kSprFromChannel = 0x1000D000u;
+    static constexpr uint32_t kSprToChannel = 0x1000D400u;
+    static constexpr uint32_t kDStat = 0x1000E010u;
+    if (channelBase != kSprFromChannel && channelBase != kSprToChannel)
+        return false;
+
+    const bool fromScratchpad = channelBase == kSprFromChannel;
+    const uint32_t mode = (chcr >> 2u) & 0x3u;
+    if (mode != 0u)
+    {
+        // Chain (destination/source) and interleave modes are not modeled yet: say so once
+        // instead of leaving the channel silently busy.
+        static std::atomic<bool> s_warned{false};
+        if (!s_warned.exchange(true))
+            std::fprintf(stderr, "[sprdma] %s mode=%u not implemented (chcr=0x%x)\n",
+                         fromScratchpad ? "fromSPR" : "toSPR", mode, chcr);
+        return false;
+    }
+
+    const uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
+    const uint32_t byteCount = qwc * 16u;
+    const uint32_t originalMadr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
+    const uint32_t originalSadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
+
+    uint32_t mainOffset = 0u;
+    try
+    {
+        mainOffset = translateAddress(originalMadr);
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+
+    if (mainOffset > PS2_RAM_SIZE || byteCount > PS2_RAM_SIZE - mainOffset)
+        return false;
+
+    uint32_t scratchOffset = originalSadr;
+    uint32_t bytesLeft = byteCount;
+    uint32_t copied = 0u;
+    while (bytesLeft != 0u)
+    {
+        const uint32_t chunk = std::min(bytesLeft, PS2_SCRATCHPAD_SIZE - scratchOffset);
+        if (fromScratchpad)
+        {
+            std::memcpy(m_rdram + mainOffset + copied, m_scratchpad + scratchOffset, chunk);
+            markModified(mainOffset + copied, chunk);
+        }
+        else
+        {
+            std::memcpy(m_scratchpad + scratchOffset, m_rdram + mainOffset + copied, chunk);
+        }
+        copied += chunk;
+        bytesLeft -= chunk;
+        scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
+    }
+
+    m_ioRegisters[channelBase + 0x10u] = (originalMadr + byteCount) & 0x7FFFFFF0u;
+    m_ioRegisters[channelBase + 0x20u] = 0u;
+    m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
+    m_ioRegisters[channelBase] = chcr & ~0x100u;
+
+    const uint32_t cause = fromScratchpad ? 8u : 9u;
+    uint32_t dstat = m_ioRegisters.count(kDStat) ? m_ioRegisters[kDStat] : 0u;
+    dstat |= 1u << cause;
+    if (((dstat & 0x3FFu) & ((dstat >> 16u) & 0x3FFu)) != 0u)
+        dstat |= 1u << 31u;
+    else
+        dstat &= ~(1u << 31u);
+    m_ioRegisters[kDStat] = dstat;
+    queueCompletedDmacCause(cause);
+    return true;
 }
 
 void PS2Memory::queueCompletedDmacCause(uint32_t cause)

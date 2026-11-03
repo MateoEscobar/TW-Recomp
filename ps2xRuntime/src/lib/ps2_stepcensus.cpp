@@ -204,7 +204,7 @@ void ps2StepCensusStore(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint6
             const uint32_t a0 = r32(ctx->r[4]), a1 = r32(ctx->r[5]), a2 = r32(ctx->r[6]);
             const bool changing = oldv != nv;   // (a float tolerance here hid integer slots whose bits are float denormals: the ki 98400 -> 96800)
             if (changing && s_n[k]++ < 500u)
-                std::fprintf(stderr, "[addrwatch%d] slot=0x%x pc=0x%06x ra=0x%06x size=%u old=%g new=%g a0=0x%x a1=0x%x a2=0x%x frame=%llu\n", k, w, ctx->pc, r32(ctx->r[31]), size, fo, fn, a0, a1, a2, (unsigned long long)g_warriorsFrameCount.load());
+                std::fprintf(stderr, "[addrwatch%d] slot=0x%x pc=0x%06x ra=0x%06x size=%u old=0x%x(%g) new=0x%x(%g) a0=0x%x a1=0x%x a2=0x%x frame=%llu\n", k, w, ctx->pc, r32(ctx->r[31]), size, oldv, fo, nv, fn, a0, a1, a2, (unsigned long long)g_warriorsFrameCount.load());
             if (size == 16 && ctx->pc >= 0x120000u && ctx->pc < 0x122400u && (a0 & 0x1FFFFFFFu) == a && s_cnt < 6 && k < g_addrWatchCnt)
             {   // follow $a1 (the source) of a vector helper, one level below the requested slots only
                 const uint32_t srcs[1] = { ((a1 & 0x1FFFFFFFu) + off) & 0x1FFFFFFFu };

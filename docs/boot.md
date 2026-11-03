@@ -55,7 +55,8 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 3c-bis | Con el canal IOP→EE vivo el juego arranca el render: *core dump* por recursión infinita `Store32` → `drainCompletedDmacHandlers` → handler DMAC `sub_0048B708` → `Store32`… | **Resuelto** (3c) | Runtime EE (a): los handlers DMAC se despachaban reentrantes desde el `Store32` que lanza el siguiente DMA, y además reutilizaban la misma pila asíncrona del handler interrumpido. En el EE un handler corre con las interrupciones enmascaradas | `drainCompletedDmacHandlers` no reentra: las completaciones que llegan durante un handler quedan en cola y las entrega el drenaje exterior al volver |
 | 4 | **Primer `flips=1`**. Hilo principal en la espera de flush DMA de RenderWare (`sub_0048C508`, `pc=0x48c5f0`, `ra=0x48c628`): `[gp-0x7600]=0x7acc18 ≠ [gp-0x75FC]=0x7acc10`, contador de completaciones pendientes `[gp-0x7608]=1` | **Resuelto** (sesión 5) | Runtime EE (a) + GS/VIF (d), tres huecos encadenados: (4a) completaciones DMAC entregadas dentro de una sección `di` y desde otro hilo host mientras corría un handler → la cola de paquetes de RW se pasaba del final; (4b) `GIF_STAT` sin modelar y escrituras a `VIF1_FIFO` ignoradas → el paquete `0x21` esperaba `M3P` para siempre en el hilo de vblank; (4c) un kick de cadena vacía no levantaba la interrupción DMAC → `cnt=1` perpetuo | (4a) enmascarado EE: `Status.EIE` por contexto (hilos arrancan con EIE=1, handlers con EXL), entrega diferida en el despachador/tras el handler, profundidad de interrupción y drenaje globales; (4b) `VIF0/VIF1_FIFO` → intérprete VIF (vía worker asíncrono) y `GIF_STAT` con `M3R/M3P/IMT/PSE/FQC` como upstream; (4c) todo canal iniciado con `STR` completa aunque no traiga datos |
 | 5 | Pantalla negra de verdad con ~30 flips/s: el juego pasa la memcard y entra en carga; el IOP lee ~19 MB del WAD en ~10 s y luego nada, mientras MultiStream sondea sin fin el NAX de las voces SPU2 | **Resuelto** (sesión 7) | SIF/IOP (b): `ps2xIOP` no emulaba el SPU2; MultiStream sondea el NAX de sus voces para saber cuánto consumió de cada anillo y pedir más datos, y NAX valía siempre 0 | SPU2 fase 1 portado de god-of-war-recomp al fork `ps2xIOP` (`feature/TWR-27-spu2-phase1` `115cf21`), avanzado también dentro de `runCpu` (sondeo desde RPC síncronas) |
-| 6 | Con el SPU2 la música se transmite (2 voces, `IOP/MUSIC.SND`, DMA ~115 KB/s) pero la pantalla sigue negra: `prims/sec≈180`, `Mpix/sec=0`. El WAD deja de leerse a los ~15 s; el hilo principal alterna `0x154EE0` (gestor de carga) y `0x48c5f0` (flush DMA de RW). La caída a ~1 flip/s en `0x48c5f0` aparece según el tiempo (con `strace`, o tras ~40 s), con y sin SPU2 | **Abierto** | Sin diagnosticar. Dos frentes: (a) qué espera el gestor de carga tras el último bloque del WAD; (b) carrera en la espera de flush de RW (`0x48e118 ← 0x48fd28 ← 0x482814*`) | — |
+| 6 | Con el SPU2 la música se transmite pero la pantalla sigue negra: `prims/sec≈180`, `Mpix/sec=0`. Los ~6 prims/frame son POINT con XYZ=0 y RGBA=0 por PATH2; nada por PATH1 | **Resuelto** (sesión 8) | GS/VIF (d) + runtime EE (a): RenderWare arma sus paquetes GIF en el scratchpad y los copia a la lista DMA de RAM con DMA **fromSPR** (canal 8, modo normal, ~350/s). El runtime heredado de BT3 no implementaba los canales 8/9 → la lista que leía VIF1 (`cnt qwc=72; DIRECT 72` en `0x7acc80`/`0x87c880`) solo tenía las etiquetas escritas por la CPU y ceros en lugar de los datos GIF (ver detalle) | `PS2Memory::tryProcessScratchpadDma` portado de upstream (canales 8/9 en modo normal, `D_STAT.CIS8/9`, aviso único `[sprdma]` en modos cadena/intercalado). Resultado: borrado de pantalla real de RW (franjas de 32 px) y sprites texturizados por PATH1 (VU1) |
+| 7 | Con datos GIF reales el hilo principal se queda para siempre en `0x48c5f0` (flush DMA de RW) a los ~3-5 s: `cnt=[gp-0x7608]=1`, `q0=[gp-0x7600]` **pasado** de `q1=[gp-0x75FC]` (q0 = q1 + 8), VIF1/GIF ociosos. Es la "carrera" de las sesiones 5-7, ahora determinista | **Abierto** | Runtime EE (a): los handlers de interrupción corren en paralelo con el hilo guest que interrumpen. El handler DMAC `sub_0048B708` (contexto de interrupción, worker de vblank) baja `cnt` a 0 en `0x48b778` y sigue procesando la cola; a la vez el hilo principal (`sub_0048E048`, sin `di`) ve `cnt==0 && q0!=q1`, entra en `handler(-1)`, procesa la misma entrada y avanza `q0` una vez de más. En la PS2 la interrupción preempta al hilo (una sola CPU) y el invariante del juego (`cnt==0` ⇒ no hay DMA en vuelo ⇒ no llega IRQ DMAC) se cumple | Pendiente de decisión del dev (ver detalle): entregar INTC/DMAC en el hilo guest con el token del planificador, en `eeCheckpointDue`/despachador, o portar el `EeScheduler` de upstream |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -263,6 +264,49 @@ Sigue abierta como síntoma secundario del bloqueo 5; se revisa después del SPU
 - Trazas temporales en el fork (no commiteadas): `cdvdman` en `dispatchImport`, entrega de
   `servicePendingGuestCallbacks`, histograma de `IopMemory::readHardware32`. IRX: base de carga
   `0x20700`; los offsets `lui 0x1 / lw 0x7474` del archivo se reubican a `0x30000 + 0x7b74`.
+
+## Detalle del bloqueo 6 — sin DMA del scratchpad (sesión 8)
+
+- **Qué se veía:** traza temporal de `GSRasterizer::drawPrimitive` → 100 % `type=0` (POINT), XYZ=0,
+  RGBA=0, `path=2`; `PS2X_GPU=1` daba lo mismo (`glcalls=0`), así que no era el rasterizador SW.
+- **Volcado VIF1** (traza temporal en `processVIF1Data`): paquetes de 1 160 B = `NOP; DIRECT 0x48`
+  + 72 qw casi todo a cero, con etiquetas DMA **dentro** de los datos (`cnt qwc=0xd; NOP; DIRECT 0xd`,
+  `ref qwc=0x21 addr=0x7ac400; FLUSH; FLUSHA`). El GS tomaba esas etiquetas como GIFtags → los POINT.
+- **Cadena** (traza en el recorrido de etiquetas): `cnt qwc=72` + `refe`, en doble búfer
+  `0x7acc80`/`0x87c880` (cambia con `CSR.FIELD`). Las etiquetas internas las escribe la CPU; el resto
+  del bloque lo debía rellenar DMA.
+- **`PS2X_DMA_PROBE=1`:** 142 muestras de `0x1000D000` (fromSPR, `mode=0`, `chcr=0x100`) por 14 de
+  VIF1: ~64× más arranques. `grep` en el runtime: ningún código para `0x1000D000/0x1000D400`. Upstream
+  tiene `PS2Memory::tryProcessScratchpadDma` (`ps2xRecomp/ps2xRuntime/src/lib/ps2_memory.cpp`).
+- **Fix:** portado tal cual (normal: copia SPR↔RAM con vuelta a 16 KB, `MADR/SADR/QWC` actualizados,
+  `STR` abajo, `D_STAT.CIS8/9` + cola de causas DMAC). Modos cadena/intercalado no se usan hoy: aviso
+  único `[sprdma] … mode=N not implemented`.
+- **Después del fix:** `type=6` (SPRITE) por PATH2 = borrado de RW en franjas de 32×448, negro
+  (`rgba=0x80000000`), y sprites texturizados por PATH1 (`tbp0=14496`, centrados en (320,224), aún de
+  tamaño 0: probablemente una animación de entrada). `Mpix/sec` sigue en 0 aunque los sprites son
+  visibles: el contador de píxeles no cubre ese camino (pendiente de revisar, no bloquea).
+
+## Detalle del bloqueo 7 — handlers de interrupción en paralelo al hilo (sesión 8)
+
+- **Estado en el atasco** (`[stallprobe]` + volcado temporal): `VIF1 CHCR=0x…45` (sin `STR`),
+  `GIF CHCR` sin `STR`, `D_STAT=0x106`, `cnt=1`, `q0=0x87c820`, `q1=0x87c818`, `[q0-8]=00001042 01041810`
+  (paquete `0x42`). Los vblank siguen llegando (handler `0x48BDB0` en modo contador, `[gp-0x7958]=1`).
+- **Secuencia** (`PS2X_ADDRWATCH=5970e8,5970f0,5970f4 PS2X_ADDRWATCH_ALL=1`, ahora con valores en hex):
+  cola `[0x87c800,0x87c818)` con 3 entradas → el principal lanza e0 (`cnt=1`, `ra=0x48c058`) → el
+  handler DMAC (`ra=0`) baja `cnt` y procesa e1 y e2 (`0x42`, `ra=0x48bcc0`) hasta `q0=q1` → el principal
+  desde `0x48e0e8` (`sub_0048E048`) llama `handler(-1)` y avanza `q0` de `0x87c818` a `0x87c820` con
+  `cnt=1`. `sub_0048B708` sí comprueba `cnt` y `q0==q1` al entrar (`0x48b764..0x48b790`), así que el
+  único modo de pasarse es que dos instancias corran a la vez.
+- **Por qué pasa aquí y no en la PS2:** `dispatchIntcHandlersForCause` corre en el worker de
+  interrupciones (`interruptWorkerMain`) y al terminar llama `deliverPendingDmacInterruptsAfterHandler`
+  → `drainCompletedDmacHandlers`: el handler DMAC corre en otro hilo host mientras el hilo guest sigue
+  ejecutando. El enmascarado de 4a solo evita entregar con el principal en `di`: medido, 0 entregas con
+  el principal en `di`. El código del juego no usa `di` aquí porque en hardware no le hace falta.
+- **Comparativa:** upstream PS2Recomp y god-of-war-recomp usan `EeScheduler`
+  (`ps2xRecomp/ps2xRuntime/include/runtime/ee_scheduler.h`): las IRQ (`dispatchIrq`) se entregan en
+  los *checkpoints* del hilo en ejecución (`checkpointDue`, `interruptSafe`, preempción por
+  prioridad). Nuestro runner generado ya llama `PS2Runtime::eeCheckpointDue()` en cada salto hacia
+  atrás (3 090 archivos), pero hoy esa llamada solo avanza el IOP y cede el token cada 65 536 ciclos.
 
 ## Capa BT3 retirada en TWR-27
 

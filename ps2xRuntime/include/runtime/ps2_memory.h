@@ -545,6 +545,7 @@ public:
     const uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const;
     void updateEeTimer0Counter();
     void queueCompletedDmacCause(uint32_t cause);
+    bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     uint64_t m_timer0LastHostNs = 0;
     uint64_t m_timer0FractionNs = 0;
 };
