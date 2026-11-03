@@ -664,7 +664,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     copyBytes = PS2_VU1_CODE_SIZE - destAddr;
                 if (pos + copyBytes <= sizeBytes)
                     std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
-                    { extern std::atomic<uint32_t> g_vu1CodeGen; g_vu1CodeGen.fetch_add(1u, std::memory_order_relaxed); }   // [vucache16] invalidate the decode cache
+                {   // [vucache16] invalidate the decode cache; [TWR-27 decision 22] logs the written range for the native VU1
+                    extern void ps2xVu1CodeModified(uint32_t lo, uint32_t hi);
+                    ps2xVu1CodeModified(destAddr, destAddr + copyBytes);
+                }
                 {   // [vu1jit-missdump] program extent hi-water: an upload at 0 starts a program, later chunks extend it
                     extern std::atomic<uint32_t> g_vu1MpgHi;
                     const uint32_t end = destAddr + copyBytes;

@@ -892,6 +892,9 @@ endif()
 if(NOT MSVC AND PS2X_TARGET_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     target_compile_options(ps2_runtime PRIVATE -msse4.1)
     target_compile_options(ps2EntryRunner PRIVATE -msse4.1)
+    # [TWR-27 decision 22] The upstream VU1 engine and the native VU1 blocks share the inline SSE4.1 helpers of
+    # ps2_vu1_native.h: same ISA in every translation unit that includes it.
+    target_compile_options(ps2_vu1_upstream PRIVATE -msse4.1)   # ps2_vu1_native_blocks: same flag where it is defined
 endif()
 
 # ARM can fuse multiply/add by default; guest VU math requires two roundings.
@@ -1156,6 +1159,58 @@ target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+
+# [TWR-27 decision 22] Native VU1 (god-of-war-recomp / Waffle565): the game's VU1 micro memories, captured with
+# GOW_VU1_CAPTURA=<dir>, are translated at build time by vu1n_gen.py (fork, GPLv3) into straight-line C++ blocks that the
+# upstream VU1 engine runs instead of interpreting; the exact engine stays as fallback and as oracle (GOW_VU1N_VERIFY=N).
+# The blocks are game data: generated in the build tree, never committed. Empty PS2X_VU1_MICROCODE_DIR = interpreter only.
+# Built as an OBJECT library linked straight into the executable: each part only registers its blocks from a static
+# initializer, which a static archive would drop. Same renaming macros and include order as ps2_vu1_upstream.
+set(PS2X_VU1_MICROCODE_DIR "" CACHE PATH "Captured VU1 micro memories (*.bin) for the native VU1; empty = interpreter only")
+if(PS2X_VU1_MICROCODE_DIR)
+    file(GLOB PS2X_VU1_IMAGES CONFIGURE_DEPENDS "${PS2X_VU1_MICROCODE_DIR}/*.bin")
+    find_package(Python3 COMPONENTS Interpreter)
+    set(PS2X_VU1N_GEN "${PS2X_UPSTREAM_RUNTIME_DIR}/tools/vu1/vu1n_gen.py")
+    if(PS2X_VU1_IMAGES AND Python3_FOUND AND EXISTS "${PS2X_VU1N_GEN}")
+        set(PS2X_VU1N_DIR "${CMAKE_CURRENT_BINARY_DIR}/vu1n_generated")
+        set(PS2X_VU1N_PARTS)
+        foreach(part RANGE 0 5)
+            list(APPEND PS2X_VU1N_PARTS "${PS2X_VU1N_DIR}/vu1n_part${part}.cpp")
+        endforeach()
+        # Extra entry pcs (one hex per line), e.g. misses logged with GOW_VU1N_DIAG; optional, next to the images.
+        set(PS2X_VU1N_HEADS "${PS2X_VU1_MICROCODE_DIR}/vu1n_heads.txt")
+        set(PS2X_VU1N_HEADS_DEP)
+        if(EXISTS "${PS2X_VU1N_HEADS}")
+            set(PS2X_VU1N_HEADS_DEP "${PS2X_VU1N_HEADS}")
+        endif()
+        add_custom_command(OUTPUT ${PS2X_VU1N_PARTS}
+            COMMAND "${Python3_EXECUTABLE}" -I "${PS2X_VU1N_GEN}" "${PS2X_VU1N_DIR}" "${PS2X_VU1_MICROCODE_DIR}"
+                    --heads "${PS2X_VU1N_HEADS}" --parts 6
+            DEPENDS "${PS2X_VU1N_GEN}" ${PS2X_VU1_IMAGES} ${PS2X_VU1N_HEADS_DEP}
+            COMMENT "Generating native VU1 blocks from ${PS2X_VU1_MICROCODE_DIR}"
+            VERBATIM)
+        add_library(ps2_vu1_native_blocks OBJECT ${PS2X_VU1N_PARTS})
+        target_include_directories(ps2_vu1_native_blocks BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu_upstream/shim
+            ${PS2X_UPSTREAM_RUNTIME_DIR}/include
+            ${PS2X_UPSTREAM_RUNTIME_DIR}/src/lib/vu
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_compile_definitions(ps2_vu1_native_blocks PRIVATE
+            VU1Interpreter=UpVu1Interpreter VU1State=UpVu1State GS=UpVu1GsSink
+            PS2Memory=UpVu1MemSink GifPathId=UpVu1GifPathId)
+        target_compile_features(ps2_vu1_native_blocks PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(ps2_vu1_native_blocks PRIVATE /bigobj)
+        elseif(PS2X_TARGET_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+            target_compile_options(ps2_vu1_native_blocks PRIVATE -msse4.1)   # as ps2_vu1_upstream (ps2_vu1_native.h)
+        endif()
+        target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:ps2_vu1_native_blocks>)
+        list(LENGTH PS2X_VU1_IMAGES PS2X_VU1_IMAGE_COUNT)
+        message(STATUS "Native VU1: ${PS2X_VU1_IMAGE_COUNT} micro memories in ${PS2X_VU1_MICROCODE_DIR}")
+    else()
+        message(STATUS "Native VU1: no micro memories / Python / generator -- interpreter only")
+    endif()
+endif()
 
 if(NOT PS2X_IS_VITA)
     target_sources(ps2EntryRunner PRIVATE

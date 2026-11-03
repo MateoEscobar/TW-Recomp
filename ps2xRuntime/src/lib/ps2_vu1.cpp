@@ -180,6 +180,39 @@ extern thread_local Vif1UnpackRec g_unpackRing[32];
 extern thread_local uint32_t g_unpackRingPos;
 extern bool g_unpackRingEnabled();
 std::atomic<uint32_t> g_vu1CodeGen{1u};
+// [TWR-27 decision 22] Byte range of VU1 micro memory written by each code generation (the MPG writer logs it), as
+// god-of-war-recomp ps2recomp-vu1-invalidacion-rango.patch: the native VU1 (upstream engine, vu1n blocks) keeps the
+// blocks outside the written range instead of dropping all of them on every upload.
+namespace
+{
+    struct Vu1CodeLogEntry { uint64_t generation; uint32_t lo, hi; };
+    constexpr size_t kVu1CodeLogSize = 64;
+    std::mutex g_vu1CodeLogMutex;
+    std::array<Vu1CodeLogEntry, kVu1CodeLogSize> g_vu1CodeLog{};
+}
+void ps2xVu1CodeModified(uint32_t lo, uint32_t hi)
+{
+    std::lock_guard<std::mutex> lock(g_vu1CodeLogMutex);
+    const uint32_t generation = g_vu1CodeGen.load(std::memory_order_relaxed) + 1u;
+    g_vu1CodeLog[generation % kVu1CodeLogSize] = Vu1CodeLogEntry{generation, lo, hi};
+    g_vu1CodeGen.store(generation, std::memory_order_relaxed);
+}
+bool ps2xVu1CodeWritesSince(uint64_t from, uint64_t to, uint64_t *gens, uint32_t *los, uint32_t *his, size_t &count)
+{
+    std::lock_guard<std::mutex> lock(g_vu1CodeLogMutex);
+    if (to <= from || to - from > kVu1CodeLogSize || to - from > count)
+        return false;
+    size_t n = 0;
+    for (uint64_t g = from + 1u; g <= to; ++g)
+    {
+        const Vu1CodeLogEntry &e = g_vu1CodeLog[g % kVu1CodeLogSize];
+        if (e.generation != g)
+            return false;   // overwritten or never logged: the caller drops every block
+        gens[n] = e.generation; los[n] = e.lo; his[n] = e.hi; ++n;
+    }
+    count = n;
+    return true;
+}
 std::atomic<uint32_t> g_vu1MpgHi{0u};   // [vu1jit-missdump] end of the latest MPG-uploaded program (bytes)   // [vucache16] external linkage: bumped by the VIF1 MPG writer (ps2_vif1_interpreter.cpp)
 namespace { thread_local const uint8_t *g_curVuCode = nullptr; thread_local uint32_t g_curCodeSize = 0;
             thread_local VU1State g_entryStateShadow{}; }

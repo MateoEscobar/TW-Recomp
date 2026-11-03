@@ -15,6 +15,7 @@ games/warriors/*.img
 # [TWR-29] IRX modules extracted from the disc for the emulated IOP (fallback when
 # PS2X_CD_IMAGE is not set). Game data: never committed.
 games/warriors/IRX/
+games/warriors/vu1_micro/
 games/warriors/Modules/
 # [TWR-27] disc tree extracted by scripts/extract_iso.py --all (install layout; BYOD)
 games/warriors/SYSTEM.CNF

@@ -199,6 +199,74 @@ letrero "WONDER WHEEL" y estructura.
 distancia de dibujado (LOD, entidades, multitudes) se recortará mientras el render vaya lento. No se parchea la
 lógica del juego.
 
+### Detalle del bloqueo 11 — rendimiento: el VU1 exacto ocupa el 80 % del hilo (sesión 13, decisión 22)
+
+**Perfil** (`perf` no está disponible: `perf_event_paranoid=4`). Se usa el perfilador por muestreo propio del runtime:
+`PS2X_EEPROF=2` (RIP de los hilos guest cada 2 ms; los offsets `rt:ps2EntryRunner+0x…` se resuelven con
+`nm -C --defined-only -S`) junto con `PS2X_DMAPROF=1` (`[vifbreak]`, `[gifprof]`, `[drawprim]`). En el título, a ~11
+flips/s:
+
+| Dónde | Hilo del juego |
+|---|---|
+| `UpVu1Interpreter` (VU1 exacto de upstream, decisión 20): `commitReadyPipelines`, `calculateFmacExactResult` (`long double`), `calculatePairReadyCycle`, `updateFmacFlags`, decodificación | **~80 %** |
+| EE recompilado | ~8 % |
+| Rasterizador SW (`drawTriangle`, `sampleTexture`, `writePixel`, CLUT) | ~6 % |
+
+Optimizar el rasterizador o pasar a GPU no habría servido. god-of-war-recomp tuvo el mismo cuello de botella con el
+mismo motor (`docs/RENDIMIENTO.md`) y lo resolvió en dos capas. **Decisión 22 (dev):** portar las dos.
+
+**Capa 1 — intérprete VU1 rápido y exacto.** Es la pila VU1 de la base Waffle565 que usa GoW
+(`ps2recomp-waffle-runtime.patch`, solo los archivos de VU), más `vu1n-leak`, `vu1-ranura64`, `vu-redondeo`,
+`vu1-invalidacion-rango`, `vu1-captura-nativa`, `vu1-clip-sinsaltos` y `vu1-madd-saturado`. Se portó al fork
+`MateoEscobar/PS2Recomp` en la rama `feature/TWR-27-vu1-perf`.
+
+- Incluye escrituras directas de VF/VI/ACC. `PS2X_VU1_QUEUES=1` vuelve al modelo con colas.
+- `vu-jump` y `vu-efu` ya estaban portados.
+- Resultado: **~11 → ~19-20 flips/s.** Con colas, ~19.
+- La base Waffle además corrige la decodificación de la EFU. La base vieja ponía `ERSQRT`/`ESIN`/`EATAN`/`EEXP` en las
+  claves `0x77`/`0x79`/`0x7C`/`0x7D`; las de PCSX2 son `0x79`/`0x7C`/`0x7D`/`0x7E`. Los tests del fork se ajustaron:
+  `ps2x_tests` da 451/453, con los mismos 2 fallos de la base.
+
+**Capa 2 — VU1 nativa.** Las micromemorias del juego se traducen al compilar a bloques de C++ en línea recta
+(`ps2xRecomp/ps2xRuntime/tools/vu1/vu1n_gen.py`, GPLv3, de Waffle565 vía GoW). El motor exacto se queda de respaldo
+para todo bloque que no exista y sirve de oráculo. Son datos del juego, así que **no se commitean**:
+
+```bash
+# 1) capturar (se puede repetir jugando: solo añade las que falten; carpeta ignorada por git)
+GOW_VU1_CAPTURA=$PWD/games/warriors/vu1_micro ./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
+# 2) generar y enlazar los bloques
+cmake -B build -DPS2X_VU1_MICROCODE_DIR=$PWD/games/warriors/vu1_micro && cmake --build build --parallel
+```
+
+- Con `PS2X_VU1_MICROCODE_DIR` vacío (por defecto, y en la CI) solo hay intérprete.
+- `GOW_VU1_NATIVE_OFF=1` desactiva la nativa al ejecutar.
+- `GOW_VU1N_VERIFY=<n>` ejecuta n lanzamientos por los dos caminos y compara estado, memoria de datos y paquetes GIF.
+- Los bloques forman una librería OBJECT enlazada directamente al ejecutable, porque solo se registran desde un
+  inicializador estático y un `.a` los descartaría.
+- El MPG del VIF1 registra el rango escrito (`ps2xVu1CodeModified`) para la invalidación por rango.
+- Captura del título: 10 micromemorias, 366 bloques, 362 generados (4 sin soporte → exacto).
+- Resultado: **~30 flips/s**, y la noria vuelve a verse: el alcance ya no cae al mínimo
+  (bloqueo 10d).
+
+**Bloqueo 12 (abierto) — la nativa difiere del exacto en el flag de overflow.** `GOW_VU1N_VERIFY=3000` sobre 2000
+ejecuciones da 602 discrepancias (GoW obtuvo 0 en su juego). En ~510 la única diferencia es el MAC final (`e020`/`c0`
+frente a 0), que no llega al programa siguiente: el MAC de arranque de cada programa tiene la misma distribución con
+y sin nativa (`GOW_VU1_STARTMAC=1`). En **~90 hay diferencias reales** de memoria de datos y paquetes GIF.
+
+Se localizó el primer bloque que diverge con la bisección del modo verificación, activada de forma temporal para
+discrepancias de memoria (sonda no commiteada):
+
+- **`0xe48`** en 10 de 12 casos; **`0x1760`** en el resto.
+- En `0xe48`, `FMAND vi1, vi7` (en `0xea8`) produce el bit ADC del vértice. Va a `MFIR.w vf13` y de ahí al paquete: es
+  el descarte de caras traseras por el signo de `MSUBy.x vf00` en `0xe88`.
+- La máscara `vi7` sale de otra cadena de `FMAND vi7, vi7` (`0xcd8`, `0xf18`). En el exacto llega a `0x8000`, el bit
+  15 del MAC = **O.x**, y en la nativa no.
+- Por tanto, el exacto y la nativa calculan distinto el **overflow** de alguna FMAC. Ojo: `vudis.py` imprime mal el
+  operando de `FMAND`; hay que decodificarlo a mano.
+
+**Siguiente paso:** comparar el cálculo de O de la FMAC implicada en los dos motores contra PCSX2 (`VUflags.cpp`) y
+corregir el que esté mal. Volver a verificar con 0 discrepancias de memoria/paquetes antes de dar la nativa por buena.
+
 ### Detalle del bloqueo 3c-bis — handlers DMAC reentrantes
 
 `sub_0048B708` es el handler DMAC de RenderWare (causas 1 VIF1 / 2 GIF y llamada directa con `a0=-1`

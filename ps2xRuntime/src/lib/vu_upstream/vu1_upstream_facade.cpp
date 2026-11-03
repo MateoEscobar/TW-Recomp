@@ -6,6 +6,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1_upstream.h"
 
+#include <cstdlib>
 #include <cstring>
 
 namespace ps2x::vu1up
@@ -17,7 +18,16 @@ namespace ps2x::vu1up
         PS2Memory mem;
     };
 
-    Engine::Engine() : m(std::make_unique<Impl>()) { m->vu.reset(); }
+    Engine::Engine() : m(std::make_unique<Impl>())
+    {
+        m->vu.reset();
+        // [TWR-27 decision 22] As god-of-war-recomp: VF/VI/ACC are written when the instruction runs instead of
+        // being queued with their latency. A reader still stalls until the register is ready, so the program
+        // result is the same; only the intermediate state seen by a cycle-budget cut differs.
+        // PS2X_VU1_QUEUES=1 restores the queued model.
+        const char *queues = std::getenv("PS2X_VU1_QUEUES");
+        m->vu.setDirectRegisterWrites(!(queues && queues[0] == '1'));
+    }
     Engine::~Engine() = default;
 
     void Engine::reset() { m->vu.reset(); }
