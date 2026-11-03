@@ -19,9 +19,10 @@
 git clone --recurse-submodules git@github.com:MateoEscobar/TW-Recomp.git
 cd TW-Recomp
 
-# 2. Aportar el ISO (BYOD) y extraer el ELF
-python3 scripts/extract_iso.py "/ruta/al/Warriors, The (USA).iso"
-# → games/warriors/SLUS_212.15
+# 2. Aportar el ISO (BYOD) y extraer el ELF + el árbol del disco (~4 GB)
+python3 scripts/extract_iso.py "/ruta/al/Warriors, The (USA).iso" --all
+# → games/warriors/SLUS_212.15, WARRIORS.DIR/.WAD, IOP/, MODULES/, PSS/ (ignorados por git)
+# Tras esto el ISO ya no se necesita para jugar.
 
 # 3. Configurar y compilar
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

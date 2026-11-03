@@ -98,7 +98,7 @@ ISO9660 de la imagen (fork), con el ISO virtual de `cdRoot` como fallback.
 
 | Variable            | Efecto |
 |---------------------|--------|
-| `PS2X_CD_IMAGE`     | Ruta al ISO. Origen principal de los IRX y de las lecturas `cdvdman`. |
+| `PS2X_CD_IMAGE`     | Opcional. Ruta al ISO: si está, es el origen de los IRX y de las lecturas `cdvdman`. Sin él todo sale del árbol extraído junto al ELF (`scripts/extract_iso.py --all`, TWR-27) y `cdvdman` usa el ISO virtual de `cdRoot`. |
 | `PS2X_IOP_LOADLOG=1`| Lista cada módulo que el juego pide (`[iop-load] …`). |
 | `PS2X_IOP_LOG=1`    | Muestra también los mensajes de nivel *debug* del subsistema (`[ps2xIOP:debug]`). |
 | `PS2X_SNDPLAY=1`    | (opt-in, antes ON) reenvía DMA EE→IOP como PCM al dispositivo. Camino heredado; sale en TWR-30. |

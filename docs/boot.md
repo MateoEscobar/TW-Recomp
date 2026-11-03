@@ -17,8 +17,12 @@
 
 ```bash
 cd /var/www/html/ports/ps2/TW-Recomp
-PS2X_CD_IMAGE="<ruta al ISO>" ./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
+python3 scripts/extract_iso.py "<ruta al ISO>" --all   # una vez: árbol del disco junto al ELF
+./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
 ```
+
+El runtime resuelve `cdrom0:` (EE y IOP) contra la carpeta del ELF, como BT3-Recomp con su `work/`. El
+ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `docs/iop.md`).
 
 ## Método de diagnóstico (ADR TWR-27 D4)
 
@@ -46,7 +50,8 @@ PS2X_CD_IMAGE="<ruta al ISO>" ./build/ps2xRuntime/ps2EntryRunner games/warriors/
 | 1 | Hilo principal en `0x154b50` (`sub_00154AE0`, `ra=0x154d1c`) x200 000 | **Desaparece** al desregistrar la capa BT3 (commit `55da112b`) | Pendiente de aislar qué override BT3 lo producía (bisección de los 12 registros retirados, sub-fase 3b) | Retiro de la capa BT3 |
 | 2 | Hilo principal en `0x47dd70` (`ra=0x47dd90`, `a1=a2=0x2000010`), `flips=0` | **Resuelto** (3b) | Runtime EE (a): `SetupHeap` recortaba el heap del kernel a `0x01F00000`; el juego pide `0x715b60..0x1FF0004` y reserva toda la RAM libre con un `malloc` (ver detalle) | Mapa de memoria `[hiarena]` (`ps2_memory.h`) + `SetupHeap`/`EndOfHeap` con semántica de kernel |
 | 3a | Bucle de frame en `0x148D10` con `sceGsSyncV` (~60/s), `flips=0`: el reloj del juego no avanza (`now=0`) | **Resuelto** (3b) | Runtime EE (a): `mfc0 Count` se traduce a `ctx->cop0_count` y nada incrementaba ese registro (ni aquí ni en el runtime upstream) | `COP0 Count` global a 294,912 MHz sobre el reloj de los timers EE (`Ps2Cop0CountReg`, `ps2xCop0CountRead/Write`) |
-| 3b | Mismo bucle con el reloj ya en marcha: el callback de frame `[0x50B728]` sigue en NULL, `flips=0` | **Abierto** (3b/3c) | Pendiente: `sub_001458D8` (setter) solo lo llaman `0x1612B0`/`0x161378`/`0x40E2D8` desde `sub_0015FE90` (gestor de flujo), que no se ejecuta | — |
+| 3b | Mismo bucle con el reloj ya en marcha: el callback de frame `[0x50B728]` sigue en NULL, `flips=0` | **Resuelto** (3b) | Instalación (c): el init (`sub_00160DF8` → `0x3535E8`) encola cargas en el objeto de streaming `[0x5E5340]` y espera con `0x154AE0`; la primera es `sceOpen("cdrom0:\WARRIORS.DIR")`, que el EE resuelve contra la carpeta del ELF, donde solo estaba el ELF → `fopen` falla y la carga nunca termina | `scripts/extract_iso.py --all` extrae el árbol del disco junto al ELF (decisión del dev: lo hace el wizard de instalación, el ISO se borra después) |
+| 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Abierto** (3c) | — | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 

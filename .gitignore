@@ -16,6 +16,13 @@ games/warriors/*.img
 # PS2X_CD_IMAGE is not set). Game data: never committed.
 games/warriors/IRX/
 games/warriors/Modules/
+# [TWR-27] disc tree extracted by scripts/extract_iso.py --all (install layout; BYOD)
+games/warriors/SYSTEM.CNF
+games/warriors/WARRIORS.DIR
+games/warriors/WARRIORS.WAD
+games/warriors/IOP/
+games/warriors/MODULES/
+games/warriors/PSS/
 *.iso
 *.img
 *.7z
