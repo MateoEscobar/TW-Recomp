@@ -388,6 +388,7 @@ bool PS2Memory::initialize(size_t ramSize)
     m_codeRegions.clear();
     m_path3Masked = false;
     m_path3MaskedFifo.clear();
+    m_path3MaskedQwc.store(0u, std::memory_order_relaxed);
     m_vif1PendingPath2ImageQwc = 0u;
     m_vif1PendingPath2DirectHl = false;
     m_timer0LastHostNs = 0;
@@ -616,6 +617,7 @@ extern "C" bool ps2xMemDeviceRestore(PS2Memory *m, void *h)
     { std::lock_guard<std::mutex> lk(m->m_completedDmacMutex); m->m_completedDmacCauses = s->dmac; }
     m->m_path3Masked = s->path3Masked; m->m_vif1PendingPath2DirectHl = s->vif1DirectHl; m->m_vif1PendingPath2ImageQwc = s->vif1ImgQwc;
     m->m_path3MaskedFifo = s->path3Fifo;
+    { uint32_t q = 0u; for (const auto &p : m->m_path3MaskedFifo) q += static_cast<uint32_t>(p.size() / 16u); m->m_path3MaskedQwc.store(q, std::memory_order_relaxed); }
     m->m_pendingGifTransfers = s->gif; m->m_pendingVif0Transfers = s->vif0; m->m_pendingVif1Transfers = s->vif1;
     g_vclockNs = s->vclock;
     return true;
@@ -1262,6 +1264,32 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    // [TWR-27] VIF0/VIF1 FIFO (as upstream ps2xRuntime): a 128-bit store pushes one qword of VIF
+    // codes/data into the VIF. The Warriors writes MSKPATH3 to VIF1_FIFO from its RenderWare DMA
+    // handler (sub_0048B708) and then polls GIF_STAT.M3P. VIF1 goes through the kick worker when
+    // async kick is on, so the qword stays ordered with the VIF1 DMA kicks around it.
+    if (!scratch && (physAddr == 0x10004000u || physAddr == 0x10005000u))
+    {
+        alignas(16) uint8_t fifoData[16];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(fifoData), value);
+        if (physAddr == 0x10004000u)
+        {
+            processVIF0Data(fifoData, sizeof(fifoData));
+        }
+        else if (asyncKickEnabled())
+        {
+            KickJob j;
+            j.kind = KickJob::Vif1;
+            j.data.assign(fifoData, fifoData + sizeof(fifoData));
+            enqueueKickJob(std::move(j));
+        }
+        else
+        {
+            processVIF1Data(fifoData, sizeof(fifoData));
+        }
+        return;
+    }
+
     if (scratch)
     {
         inRange(physAddr, sizeof(__m128i), PS2_SCRATCHPAD_SIZE, "write128 scratchpad", address);
@@ -1511,6 +1539,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 static const bool s_tw = [](){ const char *v = [](){ static const char *s_env = std::getenv("PS2X_DMAPROF"); return s_env; }(); return v && v[0] && v[0] != '0'; }();
                 const auto _tw0 = s_tw ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 uint32_t lastKickTags = 0;
+                // [TWR-27] The channel was started: it ends (D_STAT.CIS + DMAC interrupt) even when the
+                // chain carries no data (a lone END/REFE tag with QWC=0). Completion used to be keyed on
+                // queued data only, so an empty kick from The Warriors' RenderWare DMA handler never
+                // interrupted and its frame queue waited forever.
+                m_kickedDmaChannels |= (channelBase == 0x1000A000u) ? 0x4u : (channelBase == 0x10009000u) ? 0x2u : 0x1u;
                 auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
                 {
                     if (qwCount == 0)
@@ -2822,7 +2855,9 @@ void PS2Memory::kickWorkerLoop()
 void PS2Memory::processPendingTransfers()
 {
     const auto _pt0 = std::chrono::steady_clock::now();
-    const bool hadGif = !m_pendingGifTransfers.empty();
+    const uint32_t kickedChannels = m_kickedDmaChannels;
+    m_kickedDmaChannels = 0u;
+    const bool hadGif = !m_pendingGifTransfers.empty() || (kickedChannels & 0x4u) != 0u;
     for (size_t idx = 0; idx < m_pendingGifTransfers.size(); ++idx)
     {
         auto &p = m_pendingGifTransfers[idx];
@@ -2966,7 +3001,7 @@ void PS2Memory::processPendingTransfers()
     m_pendingGifTransfers.clear();
     const auto _pt1 = std::chrono::steady_clock::now();
 
-    const bool hadVif0 = !m_pendingVif0Transfers.empty();
+    const bool hadVif0 = !m_pendingVif0Transfers.empty() || (kickedChannels & 0x1u) != 0u;
     for (auto &p : m_pendingVif0Transfers)
     {
         if (!p.chainData.empty())
@@ -3025,7 +3060,7 @@ void PS2Memory::processPendingTransfers()
     m_pendingVif0Transfers.clear();
     const auto _pt2 = std::chrono::steady_clock::now();
 
-    const bool hadVif1 = !m_pendingVif1Transfers.empty();
+    const bool hadVif1 = !m_pendingVif1Transfers.empty() || (kickedChannels & 0x2u) != 0u;
     for (auto &p : m_pendingVif1Transfers)
     {
         if (g_ps2xRenderSkip.load(std::memory_order_relaxed)) continue;   // [rollback] re-simulation: never seen
@@ -3218,6 +3253,7 @@ void PS2Memory::queueCompletedDmacCause(uint32_t cause)
 {
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
     m_completedDmacCauses.push_back(cause);
+    m_completedDmacPending.store(true, std::memory_order_release);
 }
 
 std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
@@ -3225,6 +3261,7 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
     std::vector<uint32_t> causes;
     causes.swap(m_completedDmacCauses);
+    m_completedDmacPending.store(false, std::memory_order_release);
     return causes;
 }
 
@@ -3247,6 +3284,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
             emit(packet.data(), static_cast<uint32_t>(packet.size()));
     }
     m_path3MaskedFifo.clear();
+    m_path3MaskedQwc.store(0u, std::memory_order_relaxed);
 
     if (m_gifArbiter && drainImmediately)
         arbiterDrainOrHandoff();
@@ -3303,6 +3341,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         if (m_path3Masked)
         {
             m_path3MaskedFifo.emplace_back(data, data + sizeBytes);
+            m_path3MaskedQwc.fetch_add(sizeBytes / 16u, std::memory_order_relaxed);
             return;
         }
         flushMaskedPath3Packets(false);
@@ -3485,6 +3524,22 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
             return static_cast<uint32_t>((*reg >> (off * 8u)) & 0xFFFFFFFFull);
         }
         return 0u;
+    }
+
+    if (address == 0x10003020u) // GIF_STAT
+    {
+        // [TWR-27] As upstream ps2xRuntime: M3R and IMT mirror GIF_MODE, PSE mirrors GIF_CTRL and
+        // M3P is the PATH3 mask set by VIF1 MSKPATH3. FQC (bits 24-28) is the PATH3 data parked in
+        // the GIF FIFO while masked (16 qwords at most), so a guest that kicks GIF with PATH3 masked
+        // and waits for the FIFO to fill before starting VIF1 sees it fill.
+        const auto reg = [this](uint32_t a) { auto it = m_ioRegisters.find(a); return it != m_ioRegisters.end() ? it->second : 0u; };
+        const uint32_t mode = reg(0x10003010u);
+        const uint32_t ctrl = reg(0x10003000u);
+        const uint32_t fqc = std::min<uint32_t>(16u, m_path3MaskedQwc.load(std::memory_order_relaxed));
+        uint32_t stat = reg(address) & ~(0xFu | 0x1F000000u);
+        stat |= (mode & 0x1u) | (m_path3Masked.load(std::memory_order_relaxed) ? 0x2u : 0u) | (mode & 0x4u) | (ctrl & 0x8u);
+        stat |= fqc << 24u;
+        return stat;
     }
 
     if (address >= 0x10002000 && address <= 0x10002030)

@@ -402,6 +402,8 @@ public:
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
+    // [TWR-27] Lock-free check for the dispatcher's per-iteration delivery point.
+    bool hasCompletedDmacCauses() const noexcept { return m_completedDmacPending.load(std::memory_order_acquire); }
 
     // ---- Async kick pipeline (PS2X_ASYNC_KICK, DEFAULT ON since 2026-09-07; =0 opts out) ----
     // The VIF1->VU1->GIF->raster pipeline runs on a dedicated worker thread instead of
@@ -475,7 +477,11 @@ public:
     uint8_t *m_vu0Data = nullptr;
     uint8_t *m_vu1Code = nullptr;
     uint8_t *m_vu1Data = nullptr;
-    bool m_path3Masked = false;
+    // [TWR-27] Atomic: the VIF1 stream (MSKPATH3) updates it on the kick worker while the guest
+    // polls GIF_STAT.M3P on the EE thread. m_path3MaskedQwc mirrors m_path3MaskedFifo's size in
+    // qwords for GIF_STAT.FQC (PATH3 data held in the GIF FIFO while masked).
+    std::atomic<bool> m_path3Masked{false};
+    std::atomic<uint32_t> m_path3MaskedQwc{0u};
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
@@ -488,6 +494,7 @@ public:
         std::vector<uint8_t> chainData;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
+    uint32_t m_kickedDmaChannels = 0u;   // [TWR-27] bit0 VIF0, bit1 VIF1, bit2 GIF: started since the last processPendingTransfers
     std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
 
@@ -521,6 +528,7 @@ public:
     void kickWorkerLoop();
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+    std::atomic<bool> m_completedDmacPending{false};
 
     struct CodeRegion
     {

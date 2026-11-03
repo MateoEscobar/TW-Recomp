@@ -167,6 +167,9 @@ struct alignas(16) R5900Context
     float f_acc; // FPU accumulator
     uint32_t fcr31; // Control/status register
 
+    static constexpr uint32_t kCop0StatusExl = 0x00000002u;
+    static constexpr uint32_t kCop0StatusEie = 0x00010000u;
+
     R5900Context()
     {
         std::memset(this, 0, sizeof(*this));
@@ -178,8 +181,11 @@ struct alignas(16) R5900Context
         cop0_random = 47; // Start at maximum value
         // cop0_status = 0x400000; // BEV set, ERL clear, kernel mode
         // 0x00400000 = BEV (Boot Exception Vectors).
-        // 0x00000000 = Normal mode (after BIOS handoff).
-        cop0_status = 0x00000000;
+        // [TWR-27] Guest threads start with interrupts enabled (Status.EIE, bit 16), as the EE
+        // kernel creates them. DI/EI in recompiled code only toggle EIE, and the runtime reads it
+        // to hold DMAC completions while the guest has masked interrupts (see
+        // PS2Runtime::guestInterruptsEnabled). Interrupt handler contexts clear it and set EXL.
+        cop0_status = kCop0StatusEie;
         cop0_prid = 0x00002e20; // CPU ID for R5900
 
         in_delay_slot = false;
@@ -617,6 +623,35 @@ public:
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
     void drainCompletedDmacHandlers(uint8_t *rdram);
+    // [TWR-27] Interrupt masking. A DMA started by a context that has interrupts masked (after
+    // DI, or inside an interrupt handler) completes synchronously in this runtime, but its DMAC
+    // handler must not run until the guest could take the interrupt: delivering it in the middle
+    // of a DI section re-entered The Warriors' RenderWare DMA handler (sub_0048B708) and ran its
+    // packet queue past the end (bloqueo 4). Completions stay queued and are delivered by
+    // deliverPendingDmacInterrupts from the dispatcher once the thread runs with EIE set again, or
+    // when an interrupt handler returns and no thread is holding them behind DI.
+    static bool guestInterruptsEnabled(const R5900Context *ctx) noexcept
+    {
+        return ctx && (ctx->cop0_status & R5900Context::kCop0StatusEie) != 0u &&
+               (ctx->cop0_status & R5900Context::kCop0StatusExl) == 0u;
+    }
+    static void enterInterruptContext(R5900Context &ctx) noexcept
+    {
+        ctx.cop0_status = (ctx.cop0_status & ~R5900Context::kCop0StatusEie) | R5900Context::kCop0StatusExl;
+    }
+    void deliverPendingDmacInterrupts(uint8_t *rdram, R5900Context *ctx);
+    void deliverPendingDmacInterruptsAfterHandler(uint8_t *rdram);
+    // Interrupt handlers run on host threads of their own (vblank worker, DMAC drain) while guest
+    // threads keep running; on the EE nothing else runs until a handler returns. The depth keeps
+    // guest threads from taking DMAC completions while any handler is executing.
+    struct GuestInterruptScope
+    {
+        PS2Runtime &runtime;
+        explicit GuestInterruptScope(PS2Runtime &r) : runtime(r) { runtime.m_guestInterruptDepth.fetch_add(1, std::memory_order_acq_rel); }
+        ~GuestInterruptScope() { runtime.m_guestInterruptDepth.fetch_sub(1, std::memory_order_acq_rel); }
+        GuestInterruptScope(const GuestInterruptScope &) = delete;
+        GuestInterruptScope &operator=(const GuestInterruptScope &) = delete;
+    };
     bool shouldPreemptGuestExecution();
     void yieldGuestExecutionAfterWake();
     // [TWR-27] The calling guest thread waits on something only another guest thread can
@@ -842,6 +877,11 @@ private:
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};
     std::atomic<bool> m_stopRequested{false};
+    // [TWR-27] Set while a guest thread has DMAC completions queued behind DI; interrupt-context
+    // delivery waits for that thread to re-enable interrupts.
+    std::atomic<bool> m_dmacHeldByMaskedThread{false};
+    std::atomic<int> m_guestInterruptDepth{0};
+    std::atomic<bool> m_dmacDraining{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;
     DebugUiCallback m_debugUiShutdownCallback = nullptr;

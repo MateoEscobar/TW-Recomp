@@ -3101,17 +3101,18 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
     // from that store: it recursed until the host stack overflowed, and every nested handler also
     // reused the same async guest stack as the one it interrupted. Completions raised while a
     // handler runs stay queued and are delivered by the outermost drain, after it returns.
-    thread_local bool t_inDmacHandler = false;
-    if (t_inDmacHandler)
+    // The guard is global, not per host thread: handlers also run on the vblank worker while guest
+    // threads deliver from their dispatchers, and two DMAC handlers must never overlap.
+    bool expected = false;
+    if (!m_dmacDraining.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
         return;
     }
     struct Guard
     {
-        bool &flag;
-        explicit Guard(bool &f) : flag(f) { flag = true; }
-        ~Guard() { flag = false; }
-    } guard(t_inDmacHandler);
+        std::atomic<bool> &flag;
+        ~Guard() { flag.store(false, std::memory_order_release); }
+    } guard{m_dmacDraining};
     for (std::vector<uint32_t> causes = m_memory.consumeCompletedDmacCauses(); !causes.empty();
          causes = m_memory.consumeCompletedDmacCauses())
     {
@@ -3120,6 +3121,39 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
             ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
         }
     }
+}
+
+void PS2Runtime::deliverPendingDmacInterrupts(uint8_t *rdram, R5900Context *ctx)
+{
+    if (!m_memory.hasCompletedDmacCauses())
+    {
+        return;
+    }
+    if (m_guestInterruptDepth.load(std::memory_order_acquire) > 0)
+    {
+        return;   // a handler is running: delivered after it returns
+    }
+    if (!guestInterruptsEnabled(ctx))
+    {
+        // A thread inside DI keeps them pending; an interrupt context leaves them to whoever
+        // dispatched it (the outer drain, or deliverPendingDmacInterruptsAfterHandler).
+        if (ctx && (ctx->cop0_status & R5900Context::kCop0StatusExl) == 0u)
+        {
+            m_dmacHeldByMaskedThread.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+    m_dmacHeldByMaskedThread.store(false, std::memory_order_relaxed);
+    drainCompletedDmacHandlers(rdram);
+}
+
+void PS2Runtime::deliverPendingDmacInterruptsAfterHandler(uint8_t *rdram)
+{
+    if (m_dmacHeldByMaskedThread.load(std::memory_order_relaxed) || !m_memory.hasCompletedDmacCauses())
+    {
+        return;
+    }
+    drainCompletedDmacHandlers(rdram);
 }
 
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
@@ -3850,6 +3884,10 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
         m_debugRa.store(static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)), std::memory_order_relaxed);
         m_debugSp.store(static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)), std::memory_order_relaxed);
         m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0)), std::memory_order_relaxed);
+
+        // [TWR-27] The function returned to the dispatcher (end, EE checkpoint or yield): take
+        // DMAC completions held while this thread had interrupts masked, now that EI ran.
+        deliverPendingDmacInterrupts(rdram, ctx);
 
         RecompiledFunction fn = lookupFunction(pc);
         const uint32_t dispatchedPc = pc;
@@ -4738,7 +4776,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         m_memory.write32(vaddr, value);
-        drainCompletedDmacHandlers(rdram);
+        deliverPendingDmacInterrupts(rdram, ctx);
     }
     catch (const std::exception &)
     {

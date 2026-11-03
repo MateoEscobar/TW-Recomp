@@ -178,7 +178,9 @@ namespace ps2_syscalls
             }
             try
             {
+                PS2Runtime::GuestInterruptScope interruptScope(*runtime);
                 R5900Context irqCtx{};
+                PS2Runtime::enterInterruptContext(irqCtx);
                 SET_GPR_U32(&irqCtx, 28, info.gp);
                 SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
                 SET_GPR_U32(&irqCtx, 31, 0u);
@@ -214,6 +216,9 @@ namespace ps2_syscalls
                 }
             }
         }
+        // [TWR-27] DMA kicked by an INTC handler (interrupts masked while it ran) completes now
+        // that it returned, unless a guest thread holds completions behind DI.
+        runtime->deliverPendingDmacInterruptsAfterHandler(rdram);
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
@@ -267,7 +272,9 @@ namespace ps2_syscalls
             }
             try
             {
+                PS2Runtime::GuestInterruptScope interruptScope(*runtime);
                 R5900Context irqCtx{};
+                PS2Runtime::enterInterruptContext(irqCtx);
                 SET_GPR_U32(&irqCtx, 28, info.gp);
                 SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
                 SET_GPR_U32(&irqCtx, 31, 0u);

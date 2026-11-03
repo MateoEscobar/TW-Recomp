@@ -589,6 +589,9 @@ namespace ps2_syscalls
                         lastPc = pc;
                     }
 
+                    // [TWR-27] Same delivery point as PS2Runtime::dispatchLoop.
+                    runtime->deliverPendingDmacInterrupts(rdram, threadCtx);
+
                     PS2Runtime::RecompiledFunction step = runtime->lookupFunction(pc);
                     if (!step)
                     {
