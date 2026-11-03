@@ -40,8 +40,9 @@ The game's own IOP modules run on the real IOP (no stubs).
 | ![Autosave notice](docs/screenshots/boot-03-autosave-notice.png) | ![Title screen](docs/screenshots/boot-04-title-screen.png) |
 
 > Work in progress:
-> - Colours are not final.
-> - A few title-screen glyphs are garbled.
+> - The title screen is missing its animated neon *Wonder Wheel*: the 3D geometry reaches the GS
+>   collapsed, so the 3D transform path is being worked on.
+> - The colours of the legal and autosave screens are not verified against the PS2 yet.
 > - There is no audio output yet (TWR-30).
 > - Input past the title screen is the next milestone.
 
@@ -230,7 +231,7 @@ software renderer. Logs go to `logs/warriors.log` (or `PS2X_LOGFILE=<path>`).
 | C++ recompilation | 🔍 In review | 16,262 files, build 2072/2072 passes (TWR-12) |
 | IOP (real IRX modules) | ✅ Done | `ps2xIOP` interpreter, MultiStream answers RPC `0x12345` (TWR-29) |
 | Boot | 🚧 In progress | Legal → memory card → autosave → title screen (TWR-27) |
-| Rendering | 🚧 Partial | Software renderer draws the boot screens. Colours/glyphs WIP; OpenGL path opt-in (TWR-14) |
+| Rendering | 🚧 Partial | Software renderer draws the 2D boot screens correctly. 3D (title-screen Wonder Wheel) WIP; OpenGL path opt-in (TWR-14) |
 | Audio (MultiStream + SPU2) | 🚧 Partial | Music streams inside the emulated IOP. No host output yet (TWR-30) |
 | Input | ⏳ Next | HLE of the game's own `libpad` → SDL2 (TWR-27 / TWR-18) |
 | Playable build | ⏳ Not yet | Next: main menu and a Rumble fight (TWR-27 DoD) |
