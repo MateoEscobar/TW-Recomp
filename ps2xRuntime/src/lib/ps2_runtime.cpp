@@ -3095,9 +3095,30 @@ void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
 
 void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
-    for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
+    // [TWR-27] DMAC handlers run in interrupt context, where the EE keeps further interrupts
+    // masked until the handler returns. A handler that starts the next transfer (Store32 to a
+    // channel CHCR, as The Warriors' GS DMA handler sub_0048B708 does) must not re-enter itself
+    // from that store: it recursed until the host stack overflowed, and every nested handler also
+    // reused the same async guest stack as the one it interrupted. Completions raised while a
+    // handler runs stay queued and are delivered by the outermost drain, after it returns.
+    thread_local bool t_inDmacHandler = false;
+    if (t_inDmacHandler)
     {
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+        return;
+    }
+    struct Guard
+    {
+        bool &flag;
+        explicit Guard(bool &f) : flag(f) { flag = true; }
+        ~Guard() { flag = false; }
+    } guard(t_inDmacHandler);
+    for (std::vector<uint32_t> causes = m_memory.consumeCompletedDmacCauses(); !causes.empty();
+         causes = m_memory.consumeCompletedDmacCauses())
+    {
+        for (uint32_t cause : causes)
+        {
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+        }
     }
 }
 
@@ -4564,6 +4585,16 @@ void PS2Runtime::schedBeginBlock(int tid)
         m_schedCurrent = nxt;
         if (nxt >= 0) m_schedThreads[nxt]->cv.notify_all();
     }
+}
+
+void PS2Runtime::yieldToOtherGuestThreads()
+{
+    if (m_schedEnabled && g_schedIsGuest)
+    {
+        schedYield(g_schedTid);
+        return;
+    }
+    yieldGuestExecutionAfterWake();
 }
 
 void PS2Runtime::yieldGuestExecutionAfterWake()
