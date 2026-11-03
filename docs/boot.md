@@ -51,7 +51,7 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 2 | Hilo principal en `0x47dd70` (`ra=0x47dd90`, `a1=a2=0x2000010`), `flips=0` | **Resuelto** (3b) | Runtime EE (a): `SetupHeap` recortaba el heap del kernel a `0x01F00000`; el juego pide `0x715b60..0x1FF0004` y reserva toda la RAM libre con un `malloc` (ver detalle) | Mapa de memoria `[hiarena]` (`ps2_memory.h`) + `SetupHeap`/`EndOfHeap` con semántica de kernel |
 | 3a | Bucle de frame en `0x148D10` con `sceGsSyncV` (~60/s), `flips=0`: el reloj del juego no avanza (`now=0`) | **Resuelto** (3b) | Runtime EE (a): `mfc0 Count` se traduce a `ctx->cop0_count` y nada incrementaba ese registro (ni aquí ni en el runtime upstream) | `COP0 Count` global a 294,912 MHz sobre el reloj de los timers EE (`Ps2Cop0CountReg`, `ps2xCop0CountRead/Write`) |
 | 3b | Mismo bucle con el reloj ya en marcha: el callback de frame `[0x50B728]` sigue en NULL, `flips=0` | **Resuelto** (3b) | Instalación (c): el init (`sub_00160DF8` → `0x3535E8`) encola cargas en el objeto de streaming `[0x5E5340]` y espera con `0x154AE0`; la primera es `sceOpen("cdrom0:\WARRIORS.DIR")`, que el EE resuelve contra la carpeta del ELF, donde solo estaba el ELF → `fopen` falla y la carga nunca termina | `scripts/extract_iso.py --all` extrae el árbol del disco junto al ELF (decisión del dev: lo hace el wizard de instalación, el ISO se borra después) |
-| 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Abierto** (3c) | — | — |
+| 3c | Tras abrir `WARRIORS.DIR` y subir bancos MultiStream al IOP (`Free IOP ram` 1 484 416 → 464 512), el bucle sigue: `hot=0x148D10`, RPC `0x12345` rpcNum 0 cada frame desde `0x14DA24`, callback de frame NULL, `flips=0` | **Abierto** (3c) | En diagnóstico, ver detalle | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -96,6 +96,25 @@ mismo reloj de los timers EE, que en modo frame-stepped es el reloj virtual) y c
 Count`) fija un desplazamiento global, como el registro real. No hace falta regenerar el runner: los 4
 lectores (`0x148FC8`, `0x48B708`, `0x48BDB0`, `0x4CD3D0`) usan el campo tal cual. Verificado: `now`
 avanza en ms (0 → 58 082 en ~58 s).
+
+### Detalle del bloqueo 3c — carga de `scene_list.cnk` que no termina (en diagnóstico)
+
+Cadena verificada con trazas: `sub_00160DF8` (init) → `0x3535E8` → `0x154A28`/`0x154D50` encolan
+`scene_list.cnk` (dentro de `WARRIORS.WAD`; `WARRIORS.DIR` = 10 701 entradas de 12 bytes `{offset en el
+WAD, tamaño, hash}`, desplazamientos relativos, no LBAs absolutos) → `0x154AE0` espera → `0x1549F8` corre
+el bucle principal `0x148C90` hasta que `isDone` (`0x148C38` → `0x1494D8` → `0x150838`) ve el estado del
+canal 0 del cargador (`0x5E3AC8[0]`) en 0 o 3.
+
+Observado: el estado queda en **1** todo el tiempo; el único RPC es `0x12345` rpcNum 0 (búfer de
+comandos MultiStream, 4 KB) cada frame desde `0x14DA24`, y la respuesta (`0x5E2DC0`) cambia cada frame
+(`0x0000XX01`: contador en el byte 1, byte bajo `01`). `0x14EE88` decodifica campos de bits de esa
+respuesta hacia la tabla de estados. El IOP **no hace ninguna lectura de CD** (ni `sceCdSearchFile` ni
+`sceCdRead` en el log con `PS2X_IOP_LOG=1`).
+
+Hipótesis (sin verificar): el canal FILE de MultiStream (`IOP.IRX`) acepta la petición pero su lectura de
+disco nunca arranca o nunca completa en `ps2xIOP` (hilo de carga sin despertar, `sceCdRead` asíncrono sin
+callback/IRQ de fin, o `sceCdSearchFile` de `WARRIORS.WAD` sin resolver). Siguiente paso: trazas de
+importaciones del IOP (`PS2X_IOP_XCALL_*`) sobre `cdvdman`/`thbase`/`thsemap` mientras el EE espera.
 
 ## Capa BT3 retirada en TWR-27
 
