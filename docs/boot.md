@@ -60,6 +60,11 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 8 | Sin atasco, `flips` sube y `prims/sec` llega a ~40 000, pero la pantalla sigue negra (`Mpix/sec=0`) y la RSS crece ~1 GB/s hasta agotar la RAM | **Resuelto** (sesión 9) | Render (d): el camino GPU estaba activo por defecto (`uiFlag("PS2X_GPU", true)` + `renderer = opengl` del overlay, que además pisaba `PS2X_GPU=0`). Su única publicación de frame era el kick de render de BT3 (`0x100ab8`), retirado en 3a: todo se grababa en `m_building`, nadie lo consumía, y el rasterizador SW no corría | Decisión 15 completada: software por defecto (`kRendererDefault = 1`, `PS2X_GPU` opt-in), `syncFromRuntime` coherente con el flag. Más: accesores VRAM por PSM a 64 entradas (índice `0x3F` fuera de rango → SIGSEGV en `sampleTexture`) |
 | 9 | Con el rasterizador SW hay imagen, pero incorrecta (rellenos de color sólido, diagonales, una franja de texto con texturas/CLUT mal decodificadas) y ~1-2 flips/s: el hilo principal pasa ~100 % en `0x48BB00` rasterizando dentro del kick síncrono de RW (en `di`) | **Resuelto** (sesión 10) | VIF/DMA (d) + VU1 (d), dos causas encadenadas (ver detalle): (9a) el DMA en cadena heredado no enviaba al VIF la mitad alta de las etiquetas `REF/REFS/REFE` con `CHCR.TTE=1`, así que el `UNPACK` que RW pone en esas etiquetas se perdía y los vértices se leían como VIFcodes; (9b) el intérprete VU1 heredado de BT3 diverge del VU1 exacto de upstream en todos los microprogramas de Warriors | (9a) tag-transfer para toda etiqueta VIF con `TTE` (como upstream); (9b) decisión 20: VU1 exacto de upstream vía adaptador (`ps2_vu1_upstream`) + fixes VU1 de GoW en el fork (`7b4abbe`). Resultado: aviso de autoguardado y pantalla de título, ~30 flips/s estables |
 | 10 | Pantalla de título visible pero con defectos: (10a) aviso de autoguardado y "PRESS THE START BUTTON" rotados 180°; (10b) 1 de cada ~4 glifos de "PRESS START" con ruido; (10c) falta la noria *Wonder Wheel* animada a la derecha (referencia: vídeos de la PS2 original) | 10a/10b **resueltos** (sesión 10), 10c **causa raíz resuelta** (sesión 11); 10d **diagnosticado** (sesión 12: distancia de dibujado adaptativa por FPS bajo, ver detalle) | Render (d): (10a) `drawSprite` SW intercambiaba posiciones sin UV; (10b) el GS aplicaba al vértice la Q de un ST PACKED al instante, cuando en el hardware solo la fija en el registro Q interno y la copia el siguiente RGBAQ. Los sprites de la fuente 2D llevan `ST RGBAQ XYZ2 ST XYZ2` y el segundo ST trae Q con memoria VU rancia; (10c) la geometría 3D de la noria (tiras texturizadas color 29,0,29, programa VU1 3D, entradas `0x0`/`0xf70`) llega al GS **colapsada**: casi todos los vértices en el centro de pantalla (320,224) → transformación 3D con matriz nula o incorrecta | (10a) UV intercambiadas junto con las posiciones; (10b) registro Q interno `m_stqQ` como PCSX2 (`0 → FLT_MIN`, `NaN → FLT_MAX`, reinicio por GIFtag) + Q plana del segundo vértice en sprites; (10c) pendiente: rastrear la matriz que recibe el programa 3D (sube por VIF desde el EE; revisar el cálculo en el EE con VU0/COP2) |
+| 11 | Título a ~11 flips/s: la noria desaparece (distancia de dibujado adaptativa por FPS, bloqueo 10d) | **Resuelto** (sesión 13) | VU1 (d): el VU1 exacto ocupaba ~80 % del hilo | Decisión 22: intérprete VU1 rápido + VU1 nativa de god-of-war-recomp |
+| 12 | VU1 nativa y exacta difieren en memoria/paquetes en ~4,5 % de los lanzamientos | **Resuelto** (sesión 14) | VU1 (d): flags MADD/MSUB con producto sin redondear (exacto) y latencia de Q (nativa) | `fmacProductTerm` + `qb<j>` en `vu1n_gen.py` |
+| — | "Rendimiento ~17 flips/s" abierto en la sesión 14 | **Descartado** (sesión 15) | Entorno: portátil en batería, perfil `balanced` (~1,1 GHz) | Con cargador y perfil `performance`: ~29-30 flips/s (tope del juego) y noria visible. Sin cambios de código |
+| 13 | Al confirmar las bandas en Rumble, bucle `No exact recompiled function for guest PC 0x1ef004` y `flips` congelado | **Resuelto** (sesión 15) | Recompilador: frontera de función en el delay slot del `JAL` de `0x1eeffc` (una constante `lui/ori` 0x1EF000 tomada por callback) | Fork `feature/TWR-27-function-bounds` (`55f7e10`): misma regla de delay slot que los punteros en datos; runner regenerado; guardia `tools/check_function_bounds.py` en CI |
+| 14 | Pelea Rumble: texturas del escenario y de los personajes con ruido de colores; ~8 flips/s | **Abierto** (sesión 15) | Por diagnosticar (GS SW: decodificación de texturas/CLUT o subida de VRAM) | — |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -327,6 +332,81 @@ el propio bit ADC. Había **dos causas independientes**, una en cada motor.
   CLUT, `writePixel`). Le siguen `schedYield`/`eeCheckpointDue`/`dispatchGuestBranch` con ~18 % y la VU1 exacta con
   ~3 %.
 - `GOW_VU1N_DIAG=1`: 246 entradas sin bloque nativo, por micromemorias aún no capturadas.
+
+### Rendimiento de la sesión 14 — era la energía (sesión 15)
+
+Con la build de la sesión 14 sin cambios:
+
+| Condición | CPU media | Título, flips/s |
+|---|---|---|
+| Batería, perfil `balanced`, governor `powersave` | ~1,1 GHz | ~17 (noria recortada) |
+| Cargador, `powerprofilesctl set performance` | ~2,6 GHz | **~29-30** (noria visible) |
+| Ídem con `PS2X_GS_NODRAW=1` (sin rasterizar) | — | 29,3 (techo = 30 del juego) |
+
+Antes de medir rendimiento: `cat /sys/class/power_supply/ACAD/online` y `powerprofilesctl get`. Dato lateral: el pool
+de raster por scanlines (`PS2X_RASTER_THREADS`, por defecto ncpu−2) escala mal (en batería, 0 hilos = 7 flips/s y 31
+hilos = 17). Se ataca si la pelea (bloqueo 14) lo pide.
+
+**Escenario 5 cumplido:** con Start (Enter) se ve el menú principal (STORY : EXTRAS / QUICK RUMBLE) a ~30 flips/s.
+La navegación se automatizó con XTest (`libXtst` por ctypes; el teclado por defecto: X = ✕, Enter = Start, flechas =
+cruceta).
+
+### Detalle del bloqueo 13 — frontera de función en un delay slot (sesión 15)
+
+**Síntoma.** Menú → Quick Rumble → 1 ON 1 → bandas. Al confirmar, el EE vuelve de `0x4845c0` a `0x1ef004` por el
+despachador y entra en bucle: `No exact recompiled function for guest PC 0x1ef004` (~400 000 por minuto), `flips`
+congelado y `[stallprobe] pc=0x1ef004`.
+
+**Causa.**
+
+- En `0x1eeffc` hay `jal 0x4306ec` y su delay slot es `0x1ef000: daddu a1, s0, zero`.
+- El analizador abría una función en `0x1ef000` (`sub_001EF000`). Por eso `sub_001EECC0` acababa en `0x1ef000`: no
+  ejecutaba el delay slot (`a1` llegaba mal a la llamada) y, al volver, dejaba `pc = 0x1ef004`, que no es entrada de
+  ninguna función.
+- Origen de esa "función": `ScanMaterializedCodeAddresses` (`elf_parser.cpp`). En `0x33b070`/`0x33b088` el juego pasa
+  la constante numérica `0x1EF000` a una llamada con `lui a2, 0x1e` y `ori a2, a2, 0xf000` en el delay slot. El
+  analizador la toma por un callback. No hay ningún puntero a `0x1ef000` en el ELF.
+- Mismo defecto en `0x41a420`: es el delay slot del `jr ra` de `0x41a41c` y la constante viene de `0x256cd4`/`0x256ce0`.
+  El `sb` de ese delay slot no se ejecutaba.
+
+**Referencias.**
+
+- Upstream `main` es nuestra base `e563698`, sin cambios.
+- god-of-war-recomp evita la heurística con un mapa de funciones de Ghidra (`config/funcmap.csv`).
+- El propio `elf_parser.cpp` ya tenía la regla para punteros cargados de datos (Silent Hill `0x325350`, delay slot de
+  un JALR), pero no para el camino `lui + addiu/ori`.
+
+**Fix (fork `feature/TWR-27-function-bounds` @ `55f7e10`).**
+
+- `IsDelaySlotOfControlTransfer` se comparte entre los dos caminos.
+- Test nuevo: constante `lui/ori` igual al delay slot de un JAL. Da rojo antes del fix y verde después.
+- `ps2x_tests` 452/453 antes y después; el fallo `IOP heap DMA…` es previo.
+
+**Runner regenerado** con el recompilador actual.
+
+- Cambian 18 archivos y se eliminan `sub_001EF000` y `sub_0041A420`.
+- Además corrige `psubuh` en 3 funciones (`_mm_sub_epi16` → `_mm_subs_epu16`, saturado). El generador ya estaba
+  arreglado desde la sesión 11 (MMI), pero solo se habían retocado a mano `pexcw`/`prevh`.
+- Se pierden los comentarios `[TWR-27] … do not regenerate` de esos `pexcw`: el recompilador del fork ya los emite
+  bien.
+
+**Guardia.** `tools/check_function_bounds.py` (CI, Linux) falla si una función acaba en un salto cuyo delay slot
+queda fuera. Con el runner viejo detecta los 2 casos; con el nuevo da 0.
+
+**Resultado:**
+
+- Selección de área → pantalla de carga "1 ON 1" → presentación de las bandas → cuenta atrás → **pelea con HUD
+  "PLAYER 1"**.
+- ~90 s de pelea sin crash.
+- Esc. 1 y 2 OK.
+
+### Bloqueo 14 — texturas con ruido en la pelea (abierto, sesión 15)
+
+- En la pelea, el suelo, las paredes y los personajes se ven con ruido de colores. La geometría y el HUD están bien.
+- Los menús 2D y la pantalla de carga (foto) se ven bien. Eso apunta a la subida o decodificación de texturas
+  3D (PSMT4/PSMT8 + CLUT, swizzle de VRAM), no a la VU1.
+- En la pelea el juego baja a ~8 flips/s.
+- Capturas en el handoff de TWR-27 (scratchpad efímero).
 
 ### Detalle del bloqueo 3c-bis — handlers DMAC reentrantes
 

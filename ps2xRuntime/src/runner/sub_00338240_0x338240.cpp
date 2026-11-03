@@ -79,7 +79,7 @@ void sub_00338240_0x338240(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtim
     SET_GPR_VEC(ctx, 7, PS2_PEXTLB(GPR_VEC(ctx, 0), GPR_VEC(ctx, 3)));
     // 0x33828c: 0x70073ec9  prevh       $a3, $a3
     ctx->pc = 0x33828cu;
-    SET_GPR_VEC(ctx, 7, PS2_PREVH(GPR_VEC(ctx, 7))); // [TWR-27] reversed all 8 halfwords - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 7, PS2_PREVH(GPR_VEC(ctx, 7)));
     // 0x338290: 0x70073d88  pextlh      $a3, $zero, $a3
     ctx->pc = 0x338290u;
     SET_GPR_VEC(ctx, 7, PS2_PEXTLH(GPR_VEC(ctx, 0), GPR_VEC(ctx, 7)));
@@ -88,7 +88,7 @@ void sub_00338240_0x338240(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtim
     SET_GPR_VEC(ctx, 8, PS2_PEXTLB(GPR_VEC(ctx, 0), GPR_VEC(ctx, 4)));
     // 0x338298: 0x700846c9  prevh       $t0, $t0
     ctx->pc = 0x338298u;
-    SET_GPR_VEC(ctx, 8, PS2_PREVH(GPR_VEC(ctx, 8))); // [TWR-27] reversed all 8 halfwords - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 8, PS2_PREVH(GPR_VEC(ctx, 8)));
     // 0x33829c: 0x70084588  pextlh      $t0, $zero, $t0
     ctx->pc = 0x33829cu;
     SET_GPR_VEC(ctx, 8, PS2_PEXTLH(GPR_VEC(ctx, 0), GPR_VEC(ctx, 8)));

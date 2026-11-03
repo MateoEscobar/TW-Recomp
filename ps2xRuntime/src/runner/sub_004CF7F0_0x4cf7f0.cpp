@@ -409,13 +409,13 @@ label_4cf944:
     // PREF instruction (ignored)
     // 0x4cf9cc: 0x71064568  psubuh      $t0, $t0, $a2
     ctx->pc = 0x4cf9ccu;
-    SET_GPR_VEC(ctx, 8, _mm_sub_epi16(GPR_VEC(ctx, 8), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 8, _mm_subs_epu16(GPR_VEC(ctx, 8), GPR_VEC(ctx, 6)));
     // 0x4cf9d0: 0x71264d68  psubuh      $t1, $t1, $a2
     ctx->pc = 0x4cf9d0u;
-    SET_GPR_VEC(ctx, 9, _mm_sub_epi16(GPR_VEC(ctx, 9), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 9, _mm_subs_epu16(GPR_VEC(ctx, 9), GPR_VEC(ctx, 6)));
     // 0x4cf9d4: 0x71c67568  psubuh      $t6, $t6, $a2
     ctx->pc = 0x4cf9d4u;
-    SET_GPR_VEC(ctx, 14, _mm_sub_epi16(GPR_VEC(ctx, 14), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 14, _mm_subs_epu16(GPR_VEC(ctx, 14), GPR_VEC(ctx, 6)));
     // 0x4cf9d8: 0xcfc00040  pref        0x00, 0x40($fp)
     ctx->pc = 0x4cf9d8u;
     // PREF instruction (ignored)
@@ -549,13 +549,13 @@ label_4cf944:
     SET_GPR_VEC(ctx, 14, _mm_adds_epi16(GPR_VEC(ctx, 6), GPR_VEC(ctx, 14)));
     // 0x4cfa74: 0x71e67d68  psubuh      $t7, $t7, $a2
     ctx->pc = 0x4cfa74u;
-    SET_GPR_VEC(ctx, 15, _mm_sub_epi16(GPR_VEC(ctx, 15), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 15, _mm_subs_epu16(GPR_VEC(ctx, 15), GPR_VEC(ctx, 6)));
     // 0x4cfa78: 0x71264d68  psubuh      $t1, $t1, $a2
     ctx->pc = 0x4cfa78u;
-    SET_GPR_VEC(ctx, 9, _mm_sub_epi16(GPR_VEC(ctx, 9), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 9, _mm_subs_epu16(GPR_VEC(ctx, 9), GPR_VEC(ctx, 6)));
     // 0x4cfa7c: 0x71c67568  psubuh      $t6, $t6, $a2
     ctx->pc = 0x4cfa7cu;
-    SET_GPR_VEC(ctx, 14, _mm_sub_epi16(GPR_VEC(ctx, 14), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 14, _mm_subs_epu16(GPR_VEC(ctx, 14), GPR_VEC(ctx, 6)));
     // 0x4cfa80: 0x71203ea8  pextub      $a3, $t1, $zero
     ctx->pc = 0x4cfa80u;
     SET_GPR_VEC(ctx, 7, PS2_PEXTUB(GPR_VEC(ctx, 9), GPR_VEC(ctx, 0)));
@@ -761,13 +761,13 @@ label_4cfac4:
     SET_GPR_VEC(ctx, 14, _mm_adds_epi16(GPR_VEC(ctx, 6), GPR_VEC(ctx, 14)));
     // 0x4cfb5c: 0x71064568  psubuh      $t0, $t0, $a2
     ctx->pc = 0x4cfb5cu;
-    SET_GPR_VEC(ctx, 8, _mm_sub_epi16(GPR_VEC(ctx, 8), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 8, _mm_subs_epu16(GPR_VEC(ctx, 8), GPR_VEC(ctx, 6)));
     // 0x4cfb60: 0x71264d68  psubuh      $t1, $t1, $a2
     ctx->pc = 0x4cfb60u;
-    SET_GPR_VEC(ctx, 9, _mm_sub_epi16(GPR_VEC(ctx, 9), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 9, _mm_subs_epu16(GPR_VEC(ctx, 9), GPR_VEC(ctx, 6)));
     // 0x4cfb64: 0x71c67568  psubuh      $t6, $t6, $a2
     ctx->pc = 0x4cfb64u;
-    SET_GPR_VEC(ctx, 14, _mm_sub_epi16(GPR_VEC(ctx, 14), GPR_VEC(ctx, 6)));
+    SET_GPR_VEC(ctx, 14, _mm_subs_epu16(GPR_VEC(ctx, 14), GPR_VEC(ctx, 6)));
     // 0x4cfb68: 0x71203ea8  pextub      $a3, $t1, $zero
     ctx->pc = 0x4cfb68u;
     SET_GPR_VEC(ctx, 7, PS2_PEXTUB(GPR_VEC(ctx, 9), GPR_VEC(ctx, 0)));

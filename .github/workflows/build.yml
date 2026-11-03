@@ -27,6 +27,10 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 tools/check_override_addresses.py
 
+      - name: Check recompiled function bounds
+        if: runner.os == 'Linux'
+        run: python3 tools/check_function_bounds.py
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |

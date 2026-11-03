@@ -29,22 +29,26 @@ PS2's I/O processor (IOP).
 
 ## Screenshots
 
-**First boot screens rendered natively (2026-11-03, TWR-27).** The recompiled game now
-boots from the legal screen to the title screen, at ~20–30 fps on the software renderer.
-The game's own IOP modules run on the real IOP (no stubs).
+**Boot to a Rumble fight, rendered natively (2026-11-03, TWR-27).** The recompiled game boots
+from the legal screen to the title screen and the main menu at ~30 fps on the software renderer
+(the game's own frame rate), and a Rumble fight starts and runs. The game's own IOP modules run
+on the real IOP (no stubs).
 
 | Legal screen | Memory card check |
 |:---:|:---:|
 | ![Legal screen](docs/screenshots/boot-01-legal.png) | ![Memory card check](docs/screenshots/boot-02-memcard-check.png) |
 | **Autosave notice** | **Title screen** |
-| ![Autosave notice](docs/screenshots/boot-03-autosave-notice.png) | ![Title screen](docs/screenshots/boot-04-title-screen.png) |
+| ![Autosave notice](docs/screenshots/boot-03-autosave-notice.png) | ![Title screen with the Wonder Wheel](docs/screenshots/boot-05-title-wheel.png) |
+| **Main menu** | **Rumble fight (work in progress)** |
+| ![Main menu](docs/screenshots/boot-06-main-menu.png) | ![Rumble fight](docs/screenshots/boot-07-rumble-fight-textures-wip.png) |
 
 > Work in progress:
-> - The title screen is missing its animated neon *Wonder Wheel*: the 3D geometry reaches the GS
->   collapsed, so the 3D transform path is being worked on.
+> - In fights, the 3D textures (arena and characters) come out as colour noise, and the frame rate
+>   drops to ~8 fps.
 > - The colours of the legal and autosave screens are not verified against the PS2 yet.
 > - There is no audio output yet (TWR-30).
-> - Input past the title screen is the next milestone.
+> - Performance figures were measured on a laptop on AC power with the `performance` power profile.
+>   On battery, the title screen runs at about half speed.
 
 ## Contents
 

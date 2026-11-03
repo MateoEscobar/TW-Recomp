@@ -1746,19 +1746,19 @@ label_388154:
 label_388158:
     // 0x388158: 0x700847a9  pexcw       $t0, $t0
     ctx->pc = 0x388158u;
-    SET_GPR_VEC(ctx, 8, PS2_PEXCW(GPR_VEC(ctx, 8))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 8, PS2_PEXCW(GPR_VEC(ctx, 8)));
 label_38815c:
     // 0x38815c: 0x70094fa9  pexcw       $t1, $t1
     ctx->pc = 0x38815cu;
-    SET_GPR_VEC(ctx, 9, PS2_PEXCW(GPR_VEC(ctx, 9))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 9, PS2_PEXCW(GPR_VEC(ctx, 9)));
 label_388160:
     // 0x388160: 0x700a57a9  pexcw       $t2, $t2
     ctx->pc = 0x388160u;
-    SET_GPR_VEC(ctx, 10, PS2_PEXCW(GPR_VEC(ctx, 10))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 10, PS2_PEXCW(GPR_VEC(ctx, 10)));
 label_388164:
     // 0x388164: 0x700b5fa9  pexcw       $t3, $t3
     ctx->pc = 0x388164u;
-    SET_GPR_VEC(ctx, 11, PS2_PEXCW(GPR_VEC(ctx, 11))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 11, PS2_PEXCW(GPR_VEC(ctx, 11)));
 label_388168:
     // 0x388168: 0x7ca80000  sq          $t0, 0x0($a1)
     ctx->pc = 0x388168u;
@@ -5411,19 +5411,19 @@ label_388b94:
 label_388b98:
     // 0x388b98: 0x700847a9  pexcw       $t0, $t0
     ctx->pc = 0x388b98u;
-    SET_GPR_VEC(ctx, 8, PS2_PEXCW(GPR_VEC(ctx, 8))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 8, PS2_PEXCW(GPR_VEC(ctx, 8)));
 label_388b9c:
     // 0x388b9c: 0x70094fa9  pexcw       $t1, $t1
     ctx->pc = 0x388b9cu;
-    SET_GPR_VEC(ctx, 9, PS2_PEXCW(GPR_VEC(ctx, 9))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 9, PS2_PEXCW(GPR_VEC(ctx, 9)));
 label_388ba0:
     // 0x388ba0: 0x700a57a9  pexcw       $t2, $t2
     ctx->pc = 0x388ba0u;
-    SET_GPR_VEC(ctx, 10, PS2_PEXCW(GPR_VEC(ctx, 10))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 10, PS2_PEXCW(GPR_VEC(ctx, 10)));
 label_388ba4:
     // 0x388ba4: 0x700b5fa9  pexcw       $t3, $t3
     ctx->pc = 0x388ba4u;
-    SET_GPR_VEC(ctx, 11, PS2_PEXCW(GPR_VEC(ctx, 11))); // [TWR-27] was a 64-bit half swap - do not regenerate without the fixed recompiler
+    SET_GPR_VEC(ctx, 11, PS2_PEXCW(GPR_VEC(ctx, 11)));
 label_388ba8:
     // 0x388ba8: 0x7fa80000  sq          $t0, 0x0($sp)
     ctx->pc = 0x388ba8u;
