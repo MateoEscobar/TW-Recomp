@@ -922,8 +922,11 @@ namespace
         GS &gs;
         PS2Memory *memory;
         RuntimeKickSink(GS &g, PS2Memory *m) : gs(g), memory(m) {}
+        uint32_t entryPc = 0, top = 0;
         void kick(const uint8_t *data, uint32_t sizeBytes) override
         {
+            g_xgkickEntryPc = entryPc;   // exported kick context for GS-side probes
+            g_xgkickTop = top;
             vu1CapPacket(data, sizeBytes);   // [vu1cap]
             if (memory)
                 memory->submitGifPacket(GifPathId::Path1, data, sizeBytes);
@@ -948,6 +951,8 @@ void VU1Interpreter::runUpstream(bool fresh, uint8_t *vuCode, uint32_t codeSize,
     }();
     const uint64_t gen = g_vu1CodeGen.load(std::memory_order_relaxed);
     RuntimeKickSink sink(gs, memory);
+    sink.entryPc = startPC;
+    sink.top = top;
     g_curStartPc = startPC;
     ps2x::vu1up::RunResult r = fresh
         ? m_up->execute(vuCode, codeSize, vuData, dataSize, gen, sink, startPC, top, itop, kSlice)

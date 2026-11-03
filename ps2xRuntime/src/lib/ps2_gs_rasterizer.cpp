@@ -6481,8 +6481,11 @@ void GSRasterizer::drawSprite(GS *gs)
         }
         else
         {
-            const float q0 = fabsQ(v0.q);
-            const float q1 = fabsQ(v1.q);
+            // [TWR-27 bloqueo 10b] A sprite is flat in Q: both corners divide by the Q of the
+            // second vertex (PCSX2 GSRendererSW::ConvertVertexBuffer: "q(n) isn't valid, you
+            // need to take q(n+1)").
+            const float q0 = fabsQ(v1.q);
+            const float q1 = q0;
             u0f = (v0.s / q0) * static_cast<float>(texW);
             v0f = (v0.t / q0) * static_cast<float>(texH);
             u1f = (v1.s / q1) * static_cast<float>(texW);

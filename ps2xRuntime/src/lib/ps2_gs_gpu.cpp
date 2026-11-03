@@ -619,6 +619,7 @@ void GS::reset()
     m_curB = 0x80;
     m_curA = 0x80;
     m_curQ = 1.0f;
+    m_stqQ = 1.0f;
     m_curS = 0.0f;
     m_curT = 0.0f;
     m_curU = 0;
@@ -2623,9 +2624,11 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         uint64_t tagHi = loadLE64(data + offset + 8);
         offset += 16;
 
-        m_curQ = 1.0f;
-
         uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFF);
+        // [TWR-27 bloqueo 10b] A GIFtag with NLOOP > 0 resets the GS internal Q register (the one PACKED
+        // ST latches), not the vertex Q (PCSX2 GSState::Transfer: m_q = 1.0f).
+        if (nloop > 0u)
+            m_stqQ = 1.0f;
         uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3);
         uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xF);
         if (nreg == 0)
@@ -2723,6 +2726,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         m_curG = static_cast<uint8_t>((lo >> 32) & 0xFF);
         m_curB = static_cast<uint8_t>(hi & 0xFF);
         m_curA = static_cast<uint8_t>((hi >> 32) & 0xFF);
+        m_curQ = m_stqQ;   // [TWR-27 bloqueo 10b] PACKED RGBAQ takes the Q latched by the last PACKED ST
         {
             static const bool s_rp = [](){ const char *v=std::getenv("PS2X_RGBAQ_PROBE"); return v&&v[0]&&v[0]!='0'; }();
             if (s_rp) {
@@ -2746,9 +2750,17 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         uint32_t qBits = static_cast<uint32_t>(hi & 0xFFFFFFFF);
         std::memcpy(&m_curS, &sBits, 4);
         std::memcpy(&m_curT, &tBits, 4);
-        std::memcpy(&m_curQ, &qBits, 4);
-        if (m_curQ == 0.0f)
-            m_curQ = 1.0f;
+        // [TWR-27 bloqueo 10b] PACKED ST only LATCHES Q (GS internal register); the vertex Q changes
+        // when the next PACKED RGBAQ copies it (case 0x01). Applying it to the vertex at once was
+        // wrong for packets whose second vertex has ST but no RGBAQ: RenderWare's 2D font sprites
+        // (regs ST RGBAQ XYZ2 ST XYZ2) leave stale VU memory in that Q, so every few glyphs of
+        // "PRESS THE START BUTTON" sampled with Q ~ 1e-44 and came out as noise. Same as PCSX2
+        // GIFPackedRegHandlerSTQ: Q bits == 0 -> FLT_MIN, NaN -> FLT_MAX.
+        std::memcpy(&m_stqQ, &qBits, 4);
+        if (qBits == 0u)
+            m_stqQ = std::numeric_limits<float>::min();
+        else if (std::isnan(m_stqQ))
+            m_stqQ = std::numeric_limits<float>::max();
         break;
     }
     case 0x03:
@@ -3235,8 +3247,11 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         }
         uint32_t qBits = static_cast<uint32_t>((value >> 32) & 0xFFFFFFFF);
         std::memcpy(&m_curQ, &qBits, 4);
+        // A+D / REGLIST RGBAQ carries its own Q (PCSX2 GIFRegHandlerRGBAQ: 0 -> 1.0, NaN -> FLT_MAX).
         if (m_curQ == 0.0f)
             m_curQ = 1.0f;
+        else if (std::isnan(m_curQ))
+            m_curQ = std::numeric_limits<float>::max();
         break;
     }
     case GS_REG_ST:
