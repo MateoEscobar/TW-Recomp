@@ -355,121 +355,7 @@ namespace ps2_syscalls
         return tickValue;
     }
 
-    // Warriors CD read-completion pump. The game's disc-read queue is advanced by a
-    // tick dispatcher (FUN_0028a3b0) that it only calls from code paths that
-    // themselves stall while the main thread spins on a read's state byte. With
-    // no IOP firing a CD completion interrupt, nothing drives that tick, so the
-    // read never finishes. Pump it here each vblank. Gated behind PS2X_Warriors_CDTICK.
-    static uint32_t anyRegisteredHandlerGp()
-    {
-        std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-        for (const auto &kv : g_intcHandlers)
-        {
-            if (kv.second.gp != 0u)
-            {
-                return kv.second.gp;
-            }
-        }
-        return 0u;
-    }
 
-    static void pumpGuestFunction(uint8_t *rdram, PS2Runtime *runtime, uint32_t entry, uint32_t gp)
-    {
-        if (!rdram || !runtime || entry == 0u || !runtime->hasFunction(entry))
-        {
-            return;
-        }
-        R5900Context ctx{};
-        SET_GPR_U32(&ctx, 28, gp);
-        SET_GPR_U32(&ctx, 29, getAsyncHandlerStackTop(runtime));
-        SET_GPR_U32(&ctx, 31, 0u);
-        ctx.pc = entry;
-        try
-        {
-            // Serialize with the main thread's guest execution (the runtime runs
-            // one guest context at a time under this lock). Without it, this pump
-            // races the game's own code on the shared CD queue and stalls
-            // nondeterministically. The main thread while spinning on a read
-            // releases the lock between calls, so we can slip in and advance it.
-            PS2Runtime::GuestExecutionScope guard(runtime);
-            uint32_t steps = 0u;
-            while (ctx.pc != 0u && !runtime->isStopRequested() && ++steps < 1000000u)
-            {
-                PS2Runtime::RecompiledFunction step = runtime->lookupFunction(ctx.pc);
-                if (!step)
-                {
-                    break;
-                }
-                step(rdram, &ctx, runtime);
-            }
-        }
-        catch (...)
-        {
-        }
-    }
-
-    static void warriorsPumpCdTick(uint8_t *rdram, PS2Runtime *runtime)
-    {
-        static const bool enabled = []()
-        {
-            const char *v = std::getenv("PS2X_Warriors_CDTICK");
-            return v && v[0] != '\0' && v[0] != '0';
-        }();
-        if (!enabled)
-        {
-            return;
-        }
-        static uint32_t s_gp = 0u;
-        if (s_gp == 0u)
-        {
-            s_gp = anyRegisteredHandlerGp();
-        }
-        // [cdgate] PS2X_Warriors_CDGATE (default ON, =0 off): the pump used to run 4x per REAL vblank
-        // regardless of guest progress. When the guest runs slower than 60 fps (barrier stack:
-        // ~10 fps) that is ~24 pumps between its device-state polls, the state machine cycles
-        // past the value it waits for, and the load never retires (dma counter creeps, fight
-        // never starts). Allow at most 4 pumps per guest frame, with a 250 ms fallback so a
-        // guest that is not swapping (early boot) still gets ticks.
-        static const bool s_gate = [](){ const char *v = std::getenv("PS2X_Warriors_CDGATE"); return !(v && v[0] == '0'); }();
-        extern std::atomic<uint64_t> g_gsGuestSwapCount;
-        static auto s_lastPumpT = std::chrono::steady_clock::now();
-        if (s_gate)
-        {
-            // [rollback] Frame-stepped mode counts GAME FRAMES and VBLANK TICKS instead of published swaps
-            // and milliseconds: a re-simulation renders nothing (the swap count froze) and the 250 ms
-            // fallback then paced the disc pump by the wall clock -- a different number of CD ticks per
-            // frame in every re-run and on every machine, which is where the sound thread's timing
-            // (its loop count at 0x2c9f70, the PCM it decoded) stopped matching. The counters are part of
-            // the vsync snapshot (ps2xVsyncStateGet/Set), so a restored run pumps as the original did.
-            if (ps2xFrameStepOn())
-            {
-                const uint64_t cur = g_warriorsFrameCount.load(std::memory_order_relaxed);
-                if (cur != g_cdPumpLastFrame) { g_cdPumpLastFrame = cur; g_cdPumpsThisFrame = 0; }
-                ++g_cdPumpTicksSincePump;
-                if (g_cdPumpsThisFrame >= 4 && g_cdPumpTicksSincePump < 15u) return;   // ~250 ms at 60 Hz
-                g_cdPumpTicksSincePump = 0;
-            }
-            else
-            {
-                const uint64_t cur = g_gsGuestSwapCount.load(std::memory_order_relaxed);
-                const auto now = std::chrono::steady_clock::now();
-                if (cur != g_cdPumpLastFrame) { g_cdPumpLastFrame = cur; g_cdPumpsThisFrame = 0; }
-                if (g_cdPumpsThisFrame >= 4 && now - s_lastPumpT < std::chrono::milliseconds(250)) return;
-                s_lastPumpT = now;
-            }
-        }
-        if (s_gp != 0u)
-        {
-            // Pump a few times per vblank: each disc read walks a few tick
-            // states. Keep it modest to avoid over-churning the queue.
-            if (ps2xSchedTraceOn()) std::fprintf(stderr, "[schedtrace] f=%llu CDPUMP x4 (pumps=%d ticksSince=%u)\n", (unsigned long long)g_warriorsFrameCount.load(std::memory_order_relaxed), g_cdPumpsThisFrame, g_cdPumpTicksSincePump);
-            for (int i = 0; i < 4; ++i)
-            {
-                pumpGuestFunction(rdram, runtime, 0x0028a3b0u, s_gp);
-            }
-            g_cdPumpsThisFrame += 4;
-        }
-    }
 
     // [rollback] ONE vblank tick: the body the timer worker used to inline. In frame-stepped mode
     // (PS2X_FRAMESTEP / PS2X_ROLLBACKTEST) the fiber scheduler's controller calls it whenever every
@@ -514,10 +400,8 @@ namespace ps2_syscalls
                 runtime->memory().raiseEeTimerInterruptFlag(timerCause);
                 dispatchIntcHandlersForCause(rdram, runtime, timerCause);
             }
-        // NOTE: Warriors CD read-completion is now driven inline from the
-        // read-poll (game_overrides.cpp warriorsCdReadStatePoll), which is
-        // race-free; the old cross-thread pump (warriorsPumpCdTick) is left in
-        // place but no longer called (it raced/starved).
+        // [TWR-27] The BT3 CD pump (warriorsPumpCdTick, guest code at 0x28a3b0) was removed; CD
+        // completion comes from the emulated IOP (cdvdman in ps2xIOP) and the CD stubs.
     }
 
     extern "C" bool ps2xFrameStepOn();   // ps2_runtime.cpp: frame-stepped mode (the controller delivers the ticks)
