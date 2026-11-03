@@ -1806,7 +1806,11 @@ namespace
 
 bool GsGpuRenderer::enabled()
 {
-    return uiFlag(g_uiGpu, "PS2X_GPU", true);
+    // [TWR-27 decision 15] opt-in: the GPU path publishes its draw list only at a frame boundary,
+    // and the one it had in this tree was BT3's render kick (0x100ab8), retired in TWR-27. Enabled
+    // by default it recorded every draw into a list nothing consumed (~1 GB/s of RSS) and the
+    // software rasterizer never ran (Mpix/sec=0, black screen).
+    return uiFlag(g_uiGpu, "PS2X_GPU", false);
 }
 
 GsGpuRenderer &ps2GpuRenderer()

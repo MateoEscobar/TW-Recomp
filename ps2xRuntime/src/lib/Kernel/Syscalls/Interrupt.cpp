@@ -221,6 +221,29 @@ namespace ps2_syscalls
         runtime->deliverPendingDmacInterruptsAfterHandler(rdram);
     }
 
+    void deliverPendingIntcCauses(uint8_t *rdram, PS2Runtime *runtime, uint32_t mask, bool gsSyncV, uint64_t tick)
+    {
+        if (!rdram || !runtime)
+        {
+            return;
+        }
+        const int saved = g_currentThreadId;
+        g_currentThreadId = -1;   // handlers identify as the interrupt context, as on the worker
+        if (gsSyncV)
+        {
+            ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tick);
+        }
+        for (uint32_t cause = 0u; cause < 32u && mask != 0u; ++cause)
+        {
+            if ((mask & (1u << cause)) != 0u)
+            {
+                mask &= ~(1u << cause);
+                dispatchIntcHandlersForCause(rdram, runtime, cause);
+            }
+        }
+        g_currentThreadId = saved;
+    }
+
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
     {
         if (!rdram || !runtime)
@@ -385,6 +408,24 @@ namespace ps2_syscalls
                 runtime->memory().gs().csr.fetch_xor(0x2000ull);
         }
         const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
+        if (runtime->deferGuestInterrupts())
+        {
+            // [TWR-27 decision 17] Host-side vblank effects (CSR.FIELD, vsync flag/waiters, IOP pump)
+            // stay here; guest handlers only become pending. The token holder runs them at its next
+            // checkpoint, or this worker does when every guest thread is blocked.
+            runtime->raiseGsSyncVCallback(tickValue);
+            runtime->raiseGuestIntc(kIntcVblankStart);
+            runtime->serviceGuestInterruptsIfIdle(rdram);
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            runtime->raiseGuestIntc(kIntcVblankEnd);
+            for (uint32_t timerCause = 9u; timerCause <= 12u; ++timerCause)
+            {
+                runtime->memory().raiseEeTimerInterruptFlag(timerCause);
+                runtime->raiseGuestIntc(timerCause);
+            }
+            runtime->serviceGuestInterruptsIfIdle(rdram);
+            return;
+        }
         ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
         dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
         if (!ps2xFrameStepOn())   // [rollback] stepped: every fiber is parked, the order is fixed without a sleep

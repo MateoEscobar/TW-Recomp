@@ -28,17 +28,16 @@ public:
         float masterVolume = 1.0f;
         float musicVolume = 1.0f;
         float sfxVolume = 0.4f;
-        bool gpuRenderer = true;
+        bool gpuRenderer = false;
         // [renderer] 0 = OpenGL (New: our own gfx::gl present), 1 = software rasterizer, 2 = paraLLEl-GS
         // (Vulkan compute; only when the backend is built in), 3 = Direct3D 11 (native Windows present;
         // RETIRED for now -- kept only so old settings can be migrated). gpuRenderer stays in sync
         // (renderer != 1) for the code that still reads it.
         static constexpr int kRendererOpenGL = 0, kRendererSoftware = 1, kRendererParallelGS = 2, kRendererD3D11 = 3, kRendererNative = 4;   // [nativeopt] 4 = the native Vulkan renderer at the engine seam (paraLLEl-GS device + PS2X_SEAMVK)
-#if defined(PS2X_HAVE_PGS) && !defined(_WIN32)
-        static constexpr int kRendererDefault = 2;   // [pgs] Vulkan compute backend
-#else
-        static constexpr int kRendererDefault = 0;   // [opengl-new] our own present (Windows default)
-#endif
+        // [TWR-27 decision 15] The software rasterizer is the default until the GPU/paraLLEl-GS
+        // paths are validated against Warriors' own rendering (they relied on BT3's frame kick).
+        // PS2X_GPU=1 or video.renderer in settings.toml selects another one.
+        static constexpr int kRendererDefault = 1;
         int renderer = kRendererDefault;
         int windowMode = 0;   // [display] 0 = windowed (resizable), 1 = borderless, 2 = fullscreen
         int monitor = 0;      // [display] monitor index, 0 = primary

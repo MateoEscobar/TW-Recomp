@@ -56,7 +56,9 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | 4 | **Primer `flips=1`**. Hilo principal en la espera de flush DMA de RenderWare (`sub_0048C508`, `pc=0x48c5f0`, `ra=0x48c628`): `[gp-0x7600]=0x7acc18 ≠ [gp-0x75FC]=0x7acc10`, contador de completaciones pendientes `[gp-0x7608]=1` | **Resuelto** (sesión 5) | Runtime EE (a) + GS/VIF (d), tres huecos encadenados: (4a) completaciones DMAC entregadas dentro de una sección `di` y desde otro hilo host mientras corría un handler → la cola de paquetes de RW se pasaba del final; (4b) `GIF_STAT` sin modelar y escrituras a `VIF1_FIFO` ignoradas → el paquete `0x21` esperaba `M3P` para siempre en el hilo de vblank; (4c) un kick de cadena vacía no levantaba la interrupción DMAC → `cnt=1` perpetuo | (4a) enmascarado EE: `Status.EIE` por contexto (hilos arrancan con EIE=1, handlers con EXL), entrega diferida en el despachador/tras el handler, profundidad de interrupción y drenaje globales; (4b) `VIF0/VIF1_FIFO` → intérprete VIF (vía worker asíncrono) y `GIF_STAT` con `M3R/M3P/IMT/PSE/FQC` como upstream; (4c) todo canal iniciado con `STR` completa aunque no traiga datos |
 | 5 | Pantalla negra de verdad con ~30 flips/s: el juego pasa la memcard y entra en carga; el IOP lee ~19 MB del WAD en ~10 s y luego nada, mientras MultiStream sondea sin fin el NAX de las voces SPU2 | **Resuelto** (sesión 7) | SIF/IOP (b): `ps2xIOP` no emulaba el SPU2; MultiStream sondea el NAX de sus voces para saber cuánto consumió de cada anillo y pedir más datos, y NAX valía siempre 0 | SPU2 fase 1 portado de god-of-war-recomp al fork `ps2xIOP` (`feature/TWR-27-spu2-phase1` `115cf21`), avanzado también dentro de `runCpu` (sondeo desde RPC síncronas) |
 | 6 | Con el SPU2 la música se transmite pero la pantalla sigue negra: `prims/sec≈180`, `Mpix/sec=0`. Los ~6 prims/frame son POINT con XYZ=0 y RGBA=0 por PATH2; nada por PATH1 | **Resuelto** (sesión 8) | GS/VIF (d) + runtime EE (a): RenderWare arma sus paquetes GIF en el scratchpad y los copia a la lista DMA de RAM con DMA **fromSPR** (canal 8, modo normal, ~350/s). El runtime heredado de BT3 no implementaba los canales 8/9 → la lista que leía VIF1 (`cnt qwc=72; DIRECT 72` en `0x7acc80`/`0x87c880`) solo tenía las etiquetas escritas por la CPU y ceros en lugar de los datos GIF (ver detalle) | `PS2Memory::tryProcessScratchpadDma` portado de upstream (canales 8/9 en modo normal, `D_STAT.CIS8/9`, aviso único `[sprdma]` en modos cadena/intercalado). Resultado: borrado de pantalla real de RW (franjas de 32 px) y sprites texturizados por PATH1 (VU1) |
-| 7 | Con datos GIF reales el hilo principal se queda para siempre en `0x48c5f0` (flush DMA de RW) a los ~3-5 s: `cnt=[gp-0x7608]=1`, `q0=[gp-0x7600]` **pasado** de `q1=[gp-0x75FC]` (q0 = q1 + 8), VIF1/GIF ociosos. Es la "carrera" de las sesiones 5-7, ahora determinista | **Abierto** | Runtime EE (a): los handlers de interrupción corren en paralelo con el hilo guest que interrumpen. El handler DMAC `sub_0048B708` (contexto de interrupción, worker de vblank) baja `cnt` a 0 en `0x48b778` y sigue procesando la cola; a la vez el hilo principal (`sub_0048E048`, sin `di`) ve `cnt==0 && q0!=q1`, entra en `handler(-1)`, procesa la misma entrada y avanza `q0` una vez de más. En la PS2 la interrupción preempta al hilo (una sola CPU) y el invariante del juego (`cnt==0` ⇒ no hay DMA en vuelo ⇒ no llega IRQ DMAC) se cumple | Pendiente de decisión del dev (ver detalle): entregar INTC/DMAC en el hilo guest con el token del planificador, en `eeCheckpointDue`/despachador, o portar el `EeScheduler` de upstream |
+| 7 | Con datos GIF reales el hilo principal se queda para siempre en `0x48c5f0` (flush DMA de RW) a los ~3-5 s: `cnt=[gp-0x7608]=1`, `q0=[gp-0x7600]` **pasado** de `q1=[gp-0x75FC]` (q0 = q1 + 8), VIF1/GIF ociosos | **Resuelto** (sesión 9) | Runtime EE (a): los handlers de interrupción corrían en el worker de vblank en paralelo con el hilo guest que interrumpen; el handler DMAC `sub_0048B708` y el hilo principal (`sub_0048E048`, `handler(-1)` sin `di`) procesaban la misma entrada de la cola | Decisión 17: entrega de INTC/DMAC en checkpoints del hilo con el token (`eeCheckpointDue`, `dispatchGuestBranch`, despachadores, `Store32`); el worker solo marca causas y entrega él únicamente con la CPU ociosa (ver detalle) |
+| 8 | Sin atasco, `flips` sube y `prims/sec` llega a ~40 000, pero la pantalla sigue negra (`Mpix/sec=0`) y la RSS crece ~1 GB/s hasta agotar la RAM | **Resuelto** (sesión 9) | Render (d): el camino GPU estaba activo por defecto (`uiFlag("PS2X_GPU", true)` + `renderer = opengl` del overlay, que además pisaba `PS2X_GPU=0`). Su única publicación de frame era el kick de render de BT3 (`0x100ab8`), retirado en 3a: todo se grababa en `m_building`, nadie lo consumía, y el rasterizador SW no corría | Decisión 15 completada: software por defecto (`kRendererDefault = 1`, `PS2X_GPU` opt-in), `syncFromRuntime` coherente con el flag. Más: accesores VRAM por PSM a 64 entradas (índice `0x3F` fuera de rango → SIGSEGV en `sampleTexture`) |
+| 9 | Con el rasterizador SW hay imagen, pero incorrecta (rellenos de color sólido, diagonales, una franja de texto con texturas/CLUT mal decodificadas) y ~1-2 flips/s: el hilo principal pasa ~100 % en `0x48BB00` rasterizando dentro del kick síncrono de RW (en `di`) | **Abierto** | Render (d): rasterizador SW heredado de BT3 frente a lo que dibuja Warriors (formatos de textura/CLUT, VU1 con microprogramas interpretados `[vu1jit] uncompiled`), y DMA GIF/VIF síncrono dentro del `Store32` del kick | Pendiente: capturas por etapa y comparación con el GS real; posible parada D5 (renderer RW completo, TWR-14) — consultar con el dev |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
 
@@ -307,6 +309,33 @@ Sigue abierta como síntoma secundario del bloqueo 5; se revisa después del SPU
   los *checkpoints* del hilo en ejecución (`checkpointDue`, `interruptSafe`, preempción por
   prioridad). Nuestro runner generado ya llama `PS2Runtime::eeCheckpointDue()` en cada salto hacia
   atrás (3 090 archivos), pero hoy esa llamada solo avanza el IOP y cede el token cada 65 536 ciclos.
+
+## Detalle del bloqueo 7 — resolución: interrupciones en checkpoints (sesión 9, decisión 17)
+
+- **Modelo:** con `PS2X_SCHED=1` (hilos, sin fibers) el worker de vblank ya no ejecuta código guest.
+  Mantiene en el host `CSR.FIELD`, el flag/espera de vsync y el bombeo del IOP. Marca como
+  pendientes (bitmask atómico, como `INTC_STAT`) el callback de `sceGsSyncV`, VBLANK_START/END y
+  los timers 9-12. `PS2Runtime::serviceGuestInterrupts` los entrega en el hilo con el token
+  cuando su contexto tiene `EIE` y no `EXL`. Lo llaman `eeCheckpointDue` (cada salto hacia atrás,
+  con un chequeo atómico), `dispatchGuestBranch`, los dos despachadores y `Store32`; en esos tres
+  últimos va a través de `deliverPendingDmacInterrupts`. Primero corren los handlers INTC en orden
+  de causa y después el drenaje DMAC, todo en contexto de interrupción (`t_inGuestIrq`: un
+  handler no cede el token).
+- **CPU ociosa:** si `m_schedCurrent == -1` (todos los hilos guest bloqueados), el worker toma el
+  token con el pseudo-tid `-2` (`kSchedIrqTid`), entrega y se lo pasa al siguiente hilo
+  ejecutable. `schedAcquire`/`schedRegister` ya solo toman un token libre (`== -1`) y el watchdog
+  considera vivo al `-2`.
+- **Red de seguridad:** si una IRQ lleva más de 200 ms pendiente y el titular no está en `di`, el
+  worker entrega igualmente y lo registra (`[irqdefer] STALE`). Con el hilo principal en `di` no se
+  rompe nunca su sección (se cuenta como `masked`). Estadísticas cada ~10 s: `[irqdefer] stats
+  checkpoint= idle= stale= masked=`. `PS2X_IRQDEFER=0` vuelve a la entrega en el worker (A/B).
+- **Medido (120 s, SW):** sin atasco en `0x48c5f0`, `stale=0`, RSS estable. Las corridas de los
+  stale "largos" de la primera versión (titular sin checkpoints 0,2-1 s) eran el kick de RW en `di`
+  rasterizando en el `Store32` (gdb: `sub_0048E048 → 0x48C508 → 0x48B708 → Store32 → VIF1 → VU1 →
+  GS`), agravado por la fuga del bloqueo 8.
+- **Nota:** en la sesión 9 el bloqueo 7 tampoco se reprodujo en 40 s con `PS2X_IRQDEFER=0` (la fuga
+  cambia el timing), así que la evidencia de la resolución es el modelo (ninguna ejecución de
+  handler en paralelo) más la ausencia del atasco, no un A/B determinista.
 
 ## Capa BT3 retirada en TWR-27
 

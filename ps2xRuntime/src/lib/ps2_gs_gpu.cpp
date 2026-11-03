@@ -455,8 +455,15 @@ GS::GS()
 
     InitLookupTables();
 
-    for (usz i = 0; i < 0x3F; ++i)
+    for (usz i = 0; i < 0x40; ++i)
     {
+        // [TWR-27] Undefined PSM (a garbage TEX0/FRAME, seen as a SIGSEGV in sampleTexture with
+        // psm 0x3F): read 0, drop the write, say so once. Defined formats override below.
+        m_read_vram_funcs[i] = [](u8 *, u32, u32, u32, u32) -> u32 {
+            static std::atomic<bool> s_said{false};
+            if (!s_said.exchange(true)) std::fprintf(stderr, "[gs] read with an undefined PSM: returning 0\n");
+            return 0u; };
+        m_write_vram_funcs[i] = [](u8 *, u32, u32, u32, u32, u32) {};
         switch (i)
         {
         case GS_PSM_CT32:

@@ -28,6 +28,9 @@ namespace ps2_syscalls
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause);
+    // [TWR-27 decision 17] Runs the INTC handlers for every cause in `mask` (ascending, after the
+    // sceGsSyncVCallback when `gsSyncV`), in interrupt context, on the calling host thread.
+    void deliverPendingIntcCauses(uint8_t *rdram, PS2Runtime *runtime, uint32_t mask, bool gsSyncV, uint64_t tick);
     void EnsureVSyncWorkerRunning(uint8_t *rdram, PS2Runtime *runtime);
     uint64_t GetCurrentVSyncTick();
     void stopInterruptWorker();

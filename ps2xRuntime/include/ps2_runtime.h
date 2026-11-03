@@ -641,6 +641,29 @@ public:
     }
     void deliverPendingDmacInterrupts(uint8_t *rdram, R5900Context *ctx);
     void deliverPendingDmacInterruptsAfterHandler(uint8_t *rdram);
+
+    // [TWR-27 decision 17] Interrupt delivery at guest checkpoints. On the EE an interrupt
+    // preempts the one running thread; nothing else executes until the handler returns. The
+    // runtime used to run INTC handlers (and the DMAC drain behind them) on the vblank worker in
+    // parallel with the guest thread, so The Warriors' RenderWare DMA queue (sub_0048B708 vs
+    // sub_0048E048, which calls handler(-1) without DI after seeing cnt==0) was processed twice
+    // (bloqueo 7). With the cooperative scheduler (PS2X_SCHED=1, threads) the worker now only
+    // raises the causes; the thread that holds the token delivers them at its next checkpoint
+    // (eeCheckpointDue, dispatchGuestBranch, the dispatchers, Store32) when it has interrupts
+    // enabled. When no guest thread is runnable the worker claims the token and delivers itself.
+    // PS2X_IRQDEFER=0 restores the old worker-side delivery (A/B).
+    bool deferGuestInterrupts() const noexcept { return m_irqDefer; }
+    void raiseGuestIntc(uint32_t cause) noexcept;
+    void raiseGsSyncVCallback(uint64_t tick) noexcept;
+    bool guestInterruptsPending() const noexcept
+    {
+        return m_pendingIntcMask.load(std::memory_order_acquire) != 0u ||
+               m_pendingGsSyncV.load(std::memory_order_acquire) || m_memory.hasCompletedDmacCauses();
+    }
+    // Token holder: deliver pending INTC/DMAC interrupts if `ctx` can take them now.
+    void serviceGuestInterrupts(uint8_t *rdram, R5900Context *ctx);
+    // Vblank worker: deliver only if the CPU is idle (no guest thread runnable).
+    void serviceGuestInterruptsIfIdle(uint8_t *rdram);
     // Interrupt handlers run on host threads of their own (vblank worker, DMAC drain) while guest
     // threads keep running; on the EE nothing else runs until a handler returns. The depth keeps
     // guest threads from taking DMAC completions while any handler is executing.
@@ -882,6 +905,15 @@ private:
     std::atomic<bool> m_dmacHeldByMaskedThread{false};
     std::atomic<int> m_guestInterruptDepth{0};
     std::atomic<bool> m_dmacDraining{false};
+    // [TWR-27 decision 17] pending interrupts raised by the vblank worker (see raiseGuestIntc).
+    bool m_irqDefer = false;
+    std::atomic<uint32_t> m_pendingIntcMask{0u};
+    std::atomic<bool> m_pendingGsSyncV{false};
+    std::atomic<uint64_t> m_pendingGsSyncVTick{0u};
+    std::atomic<uint64_t> m_pendingIrqSinceNs{0u};
+    std::atomic<bool> m_irqDelivering{false};
+    std::atomic<uint64_t> m_irqStats[4] = {};   // checkpoint, idle-worker, stale-fallback, masked-skips
+    void deliverGuestInterruptsNow(uint8_t *rdram);
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;
     DebugUiCallback m_debugUiShutdownCallback = nullptr;

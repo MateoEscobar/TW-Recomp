@@ -1325,6 +1325,15 @@ PS2Runtime::PS2Runtime()
         }
         if (m_schedEnabled)
             std::cerr << "[sched] deterministic cooperative guest scheduler ENABLED" << std::endl;
+        // [TWR-27 decision 17] Checkpoint delivery needs the token (threads mode). Fibers and
+        // PS2X_SCHED=0 keep the worker-side delivery.
+        {
+            const char *dv = std::getenv("PS2X_IRQDEFER");
+            const bool optOut = dv && dv[0] == '0';
+            m_irqDefer = m_schedEnabled && !m_fibersEnabled && !optOut;
+            std::fprintf(stderr, "[irqdefer] %s\n", m_irqDefer ? "interrupts delivered at guest checkpoints (token holder)"
+                                                             : "interrupts delivered by the vblank worker");
+        }
     }
     {
         const char *v = std::getenv("PS2X_VWATCH");
@@ -2328,6 +2337,14 @@ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
 }
 
 static thread_local R5900Context *t_bjCtx = nullptr; static thread_local uint8_t *t_bjRdram = nullptr;   // [thunkwatch]
+// [TWR-27 decision 17] Pseudo-tid of the vblank worker while it holds the token to deliver
+// interrupts on an idle CPU. -1 keeps meaning "nobody holds it".
+static constexpr int kSchedIrqTid = -2;
+// Set while this host thread runs guest interrupt handlers: they must not yield the token or
+// take further interrupts (EXL), whichever host thread they run on.
+static thread_local bool t_inGuestIrq = false;
+
+extern "C" void ps2xSchedSignal();   // [fibers] defined with ps2xFrameStepOn below
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
@@ -2728,6 +2745,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 {
     t_bjCtx = ctx; t_bjRdram = rdram;   // [thunkwatch] for the [badjump] slot dump
     ctx->pc = targetPc;
+    // [TWR-27 decision 17] calls and jumps are interrupt checkpoints too (loops through calls).
+    if (m_irqDefer && g_schedIsGuest && !t_inGuestIrq && guestInterruptsPending())
+        serviceGuestInterrupts(rdram, ctx);
     // [DIAG] temporary: is our injected address even reaching the branch dispatcher?
     if (targetPc >= 0x00D00000u && targetPc < 0x00E00000u)
     {
@@ -3125,6 +3145,12 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 
 void PS2Runtime::deliverPendingDmacInterrupts(uint8_t *rdram, R5900Context *ctx)
 {
+    if (m_irqDefer)
+    {   // [TWR-27 decision 17] one delivery point for INTC and DMAC (dispatchers, Store32)
+        if (g_schedIsGuest && !t_inGuestIrq && guestInterruptsPending())
+            serviceGuestInterrupts(rdram, ctx);
+        return;
+    }
     if (!m_memory.hasCompletedDmacCauses())
     {
         return;
@@ -3154,6 +3180,164 @@ void PS2Runtime::deliverPendingDmacInterruptsAfterHandler(uint8_t *rdram)
         return;
     }
     drainCompletedDmacHandlers(rdram);
+}
+
+// ---- [TWR-27 decision 17] interrupt delivery at guest checkpoints ----
+
+static uint64_t irqNowNs() noexcept
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void PS2Runtime::raiseGuestIntc(uint32_t cause) noexcept
+{
+    if (cause >= 32u)
+        return;
+    uint64_t zero = 0u;
+    m_pendingIrqSinceNs.compare_exchange_strong(zero, irqNowNs(), std::memory_order_acq_rel);
+    // Same cause raised again before delivery coalesces, like the INTC_STAT bit on hardware.
+    m_pendingIntcMask.fetch_or(1u << cause, std::memory_order_acq_rel);
+    ps2xSchedSignal();
+}
+
+void PS2Runtime::raiseGsSyncVCallback(uint64_t tick) noexcept
+{
+    uint64_t zero = 0u;
+    m_pendingIrqSinceNs.compare_exchange_strong(zero, irqNowNs(), std::memory_order_acq_rel);
+    m_pendingGsSyncVTick.store(tick, std::memory_order_release);
+    m_pendingGsSyncV.store(true, std::memory_order_release);
+}
+
+void PS2Runtime::serviceGuestInterrupts(uint8_t *rdram, R5900Context *ctx)
+{
+    if (!rdram || !ctx || t_inGuestIrq || !guestInterruptsPending())
+        return;
+    if (m_guestInterruptDepth.load(std::memory_order_acquire) > 0)
+        return;   // a handler is running on another host thread (stale fallback): it delivers after
+    if (!guestInterruptsEnabled(ctx))
+    {   // DI section (or interrupt context): stays pending until EI, as on the EE
+        m_irqStats[3].fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    m_irqStats[0].fetch_add(1u, std::memory_order_relaxed);
+    deliverGuestInterruptsNow(rdram);
+}
+
+void PS2Runtime::deliverGuestInterruptsNow(uint8_t *rdram)
+{
+    bool expected = false;
+    if (!m_irqDelivering.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
+    struct Restore
+    {
+        PS2Runtime &rt;
+        R5900Context *ctx;
+        uint8_t *rd;
+        ~Restore()
+        {
+            t_inGuestIrq = false;
+            t_bjCtx = ctx;   // handlers branch through dispatchGuestBranch with their own context
+            t_bjRdram = rd;
+            rt.m_irqDelivering.store(false, std::memory_order_release);
+        }
+    } restore{*this, t_bjCtx, t_bjRdram};
+    t_inGuestIrq = true;
+    // Bounded: a handler that keeps re-raising (DMA kicked from its own completion) is
+    // picked up at the next checkpoint instead of starving the interrupted thread.
+    for (int round = 0; round < 4 && guestInterruptsPending(); ++round)
+    {
+        m_pendingIrqSinceNs.store(0u, std::memory_order_release);
+        const uint32_t mask = m_pendingIntcMask.exchange(0u, std::memory_order_acq_rel);
+        const bool syncV = m_pendingGsSyncV.exchange(false, std::memory_order_acq_rel);
+        const uint64_t tick = m_pendingGsSyncVTick.load(std::memory_order_acquire);
+        ps2_syscalls::deliverPendingIntcCauses(rdram, this, mask, syncV, tick);
+        m_dmacHeldByMaskedThread.store(false, std::memory_order_relaxed);
+        drainCompletedDmacHandlers(rdram);
+    }
+    if (guestInterruptsPending())
+    {
+        uint64_t zero = 0u;
+        m_pendingIrqSinceNs.compare_exchange_strong(zero, irqNowNs(), std::memory_order_acq_rel);
+    }
+}
+
+void PS2Runtime::serviceGuestInterruptsIfIdle(uint8_t *rdram)
+{
+    if (!m_irqDefer || !rdram || isStopRequested())
+        return;
+    {   // every ~10 s of vblanks (called twice per tick)
+        static std::atomic<uint32_t> s_calls{0u};
+        if ((s_calls.fetch_add(1u, std::memory_order_relaxed) % 1200u) == 1199u)
+            std::fprintf(stderr, "[irqdefer] stats checkpoint=%llu idle=%llu stale=%llu masked=%llu\n",
+                         static_cast<unsigned long long>(m_irqStats[0].load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(m_irqStats[1].load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(m_irqStats[2].load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(m_irqStats[3].load(std::memory_order_relaxed)));
+    }
+    if (!guestInterruptsPending())
+        return;
+    bool claimed = false;
+    int holder = -1;
+    {
+        std::lock_guard<std::mutex> lk(m_schedMutex);
+        holder = m_schedCurrent;
+        if (m_schedCurrent == -1)
+        {   // every guest thread is blocked (WaitSema, SleepThread, vsync wait...): take the CPU
+            m_schedCurrent = kSchedIrqTid;
+            claimed = true;
+        }
+    }
+    if (claimed)
+    {
+        m_irqStats[1].fetch_add(1u, std::memory_order_relaxed);
+        {
+            GuestExecutionScope guestExecution(this);
+            deliverGuestInterruptsNow(rdram);
+        }
+        std::lock_guard<std::mutex> lk(m_schedMutex);
+        if (m_schedCurrent == kSchedIrqTid)
+        {   // a handler may have woken threads (iSignalSema, iWakeupThread): hand them the CPU
+            const int nxt = schedPickNextLocked(kSchedIrqTid);
+            m_schedCurrent = nxt;
+            if (nxt >= 0)
+                m_schedThreads[nxt]->cv.notify_all();
+        }
+        return;
+    }
+    // The holder neither delivered nor blocked: it is inside DI, or blocked in a host wait that
+    // does not hand the token over. Delivering on the worker is the old (racy) behaviour; it is
+    // kept only as a safety net against a deadlock, and logged so a run can prove it never fires.
+    const uint64_t since = m_pendingIrqSinceNs.load(std::memory_order_acquire);
+    constexpr uint64_t kStaleNs = 200ull * 1000ull * 1000ull;
+    if (since == 0u || irqNowNs() - since < kStaleNs)
+        return;
+    // A main thread inside DI is exactly what the game protects from its handlers (measured: RW's
+    // kick sub_0048C508 rasterizing a whole frame synchronously under DI). Never break into it; the
+    // interrupts are taken at its EI, as on the EE.
+    if (holder == 1 && !guestInterruptsEnabled(&m_cpuContext))
+    {
+        m_irqStats[3].fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    const uint64_t n = m_irqStats[2].fetch_add(1u, std::memory_order_relaxed);
+    if (n < 16u || (n & 1023u) == 0u)
+    {
+        bool holderBlocked = false;
+        uint32_t blockPc = 0u;
+        {
+            std::lock_guard<std::mutex> lk(m_schedMutex);
+            auto it = m_schedThreads.find(holder);
+            if (it != m_schedThreads.end()) { holderBlocked = it->second->blocked; blockPc = it->second->blockPc; }
+        }
+        std::fprintf(stderr, "[irqdefer] STALE fallback #%llu: holder tid=%d blocked=%d blockPc=0x%x dispPc=0x%x mainStatus=0x%x "
+                             "iopCall=%d delivering=%d depth=%d mask=0x%x -> delivering on the worker\n",
+                     static_cast<unsigned long long>(n + 1u), holder, (int)holderBlocked, blockPc,
+                     m_debugPc.load(std::memory_order_relaxed), m_cpuContext.cop0_status,
+                     m_iopCallDepth.load(std::memory_order_relaxed), (int)m_irqDelivering.load(std::memory_order_relaxed),
+                     m_guestInterruptDepth.load(std::memory_order_relaxed), m_pendingIntcMask.load(std::memory_order_relaxed));
+    }
+    deliverGuestInterruptsNow(rdram);
 }
 
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
@@ -4051,7 +4235,7 @@ void PS2Runtime::schedRegister(int tid, int prio)
     slot->prio = prio;
     slot->present = true;
     slot->blocked = false;
-    if (m_schedCurrent < 0) m_schedCurrent = tid;
+    if (m_schedCurrent == -1) m_schedCurrent = tid;
 }
 
 void PS2Runtime::schedUnregister(int tid)
@@ -4078,7 +4262,7 @@ void PS2Runtime::schedAcquire(int tid, int prio)
     if (!slot) { slot = std::make_unique<SchedThread>(); slot->order = m_schedOrderCounter++; slot->prio = prio; }
     slot->present = true;
     slot->blocked = false;
-    if (m_schedCurrent < 0) m_schedCurrent = tid;
+    if (m_schedCurrent == -1) m_schedCurrent = tid;
     if (schedDbgOn()) std::cerr << "[sched] tid " << tid << " ACQUIRE-wait (cur=" << m_schedCurrent << ")" << std::endl;
     if (m_fibersEnabled)
     {
@@ -4098,7 +4282,9 @@ void PS2Runtime::schedAcquire(int tid, int prio)
         // Watchdog: if the token-holder is gone (not present -> a thread that exited while
         // holding it) or invalid, reclaim/advance the token so we don't deadlock on a corpse.
         auto cit = m_schedThreads.find(m_schedCurrent);
-        const bool holderDead = (m_schedCurrent < 0) || (cit == m_schedThreads.end()) || !cit->second->present;
+        // The vblank worker delivering interrupts (kSchedIrqTid) is alive: it hands the token back.
+        const bool holderDead = (m_schedCurrent == -1) ||
+                                (m_schedCurrent != kSchedIrqTid && (cit == m_schedThreads.end() || !cit->second->present));
         if (holderDead)
         {
             int nxt = schedPickNextLocked(m_schedCurrent);
@@ -4552,6 +4738,7 @@ extern "C" void ps2xParkArg(uint64_t arg) { if (g_schedIsGuest) g_fiberTls[g_sch
 void PS2Runtime::schedYield(int tid)
 {
     if (!m_schedEnabled) return;
+    if (t_inGuestIrq) return;   // [TWR-27] a handler runs to completion: it never gives the CPU away
     bool probeOnly = false;
     {
         std::unique_lock<std::mutex> lk(m_schedMutex);
@@ -4820,6 +5007,9 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
     // (if enabled) and return true so the generated function exits to the dispatcher.
     thread_local uint64_t t_accum = 0;
     constexpr uint64_t kSliceCycles = 65536u;
+    // [TWR-27 decision 17] Every backward edge is an interrupt checkpoint for the token holder.
+    if (m_irqDefer && g_schedIsGuest && !t_inGuestIrq && t_bjCtx && guestInterruptsPending())
+        serviceGuestInterrupts(t_bjRdram, t_bjCtx);
     t_accum += cycles;
     if (t_accum < kSliceCycles)
         return false;

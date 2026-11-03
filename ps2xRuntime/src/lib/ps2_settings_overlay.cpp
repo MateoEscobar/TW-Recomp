@@ -928,6 +928,12 @@ void PS2SettingsOverlay::syncFromRuntime()
     m_settings.musicVolume = PS2AudioBackend::musicVolume();
     m_settings.sfxVolume = PS2AudioBackend::sfxVolume();
     m_settings.gpuRenderer = GsGpuRenderer::enabled();
+    // [TWR-27] keep the renderer choice coherent with the live flag, or applySettings() turned
+    // the GPU path back on from the default renderer and PS2X_GPU had no effect.
+    if (!m_settings.gpuRenderer)
+        m_settings.renderer = Settings::kRendererSoftware;
+    else if (m_settings.renderer == Settings::kRendererSoftware)
+        m_settings.renderer = Settings::kRendererOpenGL;
     m_settings.glow = GsGpuRenderer::glowEnabled();
     m_settings.glowFix = GsGpuRenderer::glowFixEnabled();
     m_settings.inkStrength = GsGpuRenderer::inkStrengthPct();

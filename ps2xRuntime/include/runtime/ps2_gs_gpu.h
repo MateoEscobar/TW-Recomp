@@ -574,8 +574,10 @@ private:
     using WriteVramFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
     using ReadVramFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
 
-    std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
-    std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
+    // [TWR-27] 0x40 entries: they are indexed with psm & 0x3F, so 0x3F was one past the end. PSMs
+    // the GS does not define get a no-op accessor (see GS::GS), never an empty std::function.
+    std::array<ReadVramFunc, 0x40> m_read_vram_funcs{ };
+    std::array<WriteVramFunc, 0x40> m_write_vram_funcs{ };
 public:
     // [wbhoist] direct access to the per-format VRAM accessors so bulk writers can hoist the
     // std::function dispatch out of their per-pixel loops.
