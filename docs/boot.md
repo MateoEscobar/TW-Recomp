@@ -267,6 +267,67 @@ discrepancias de memoria (sonda no commiteada):
 **Siguiente paso:** comparar el cálculo de O de la FMAC implicada en los dos motores contra PCSX2 (`VUflags.cpp`) y
 corregir el que esté mal. Volver a verificar con 0 discrepancias de memoria/paquetes antes de dar la nativa por buena.
 
+### Detalle del bloqueo 12 — resolución (sesión 14)
+
+**Corrección del diagnóstico de la sesión 13:** no era el overflow. En la entrada de `0xe48` vale `vi07 = 0x80`
+(máscara **S.x**) y `vi04 = 0xffff8000`. El `0x8000` que se veía es el resultado tras `IAND vi07, vi04`, es decir,
+el propio bit ADC. Había **dos causas independientes**, una en cada motor.
+
+**(12a) `0xe48`: el exacto usaba el producto sin redondear para los flags de MADD/MSUB/OPMSUB.**
+
+- El test de caras traseras es `MULAy.x ACC, vf11, vf09y` seguido de `MSUBy.x vf00, vf09, vf11y`, y el flag S.x lo
+  lee `FMAND vi01, vi07`.
+- Con el estado volcado, el triángulo es degenerado: `vf11.xy = −vf09.xy` exacto, así que el producto cruz vale 0.
+- La nativa calcula `acc − float(p)` = 0 (Z, sin S). El exacto calculaba `acc − p` en long double con el **segundo
+  producto sin redondear** frente al primero ya redondeado en ACC. Eso deja un residuo de −1,8e-7 (S) y otro ADC.
+- PCSX2 (`VUops.cpp`, `_vuOpMSUB`/`_vuOpMADD`: `acc ± float(fs·ft)`) y GoW (`docs/RENDIMIENTO.md`: "redondea el
+  producto y la suma por separado, como las FMAC de la PS2 y PCSX2") redondean el producto. GoW lo aplicó a los
+  valores, pero el camino de flags seguía sin redondear.
+- **Fix (fork):** `fmacProductTerm` en `ps2_vu1.h`. El producto se redondea a float (hacia cero) y un subnormal se
+  vacía a ±0. Solo un producto que satura (`|p| = FLT_MAX`) se deja sin redondear, igual que `vu1n::maddWide`. Se
+  usa en `normalizeFmacResult` (`ps2_vu1_core.cpp`) y en `fmacLaneT` (`ps2_vu1_compiled.inl`). El exacto también es
+  el oráculo, así que la referencia cambia en ese caso límite.
+
+**(12b) `0x1760`: la nativa no modelaba la latencia de Q.**
+
+- `vu1n_gen.py` emitía DIV/SQRT/RSQRT con semántica inmediata: `divOp` escribe `s.q` en el acto.
+- En la VU real, y en el exacto (`m_fdiv`, commit al ciclo listo) y PCSX2 (`fdiv.reg` → `VI[REG_Q]` al vaciar), una
+  FMAC que lee Q antes de que acabe la DIV (7 ciclos; RSQRT 13) **no se detiene**: para eso está `WAITQ`. Esa FMAC ve la
+  Q anterior.
+- El bucle de RW en `0x1760` hace `DIV Q` en `0x17e0` y `MULq` en `0x17e8`, un par después. La nativa le daba la Q nueva,
+  así que ST·Q y XYZ salían algo distintos (unos píxeles).
+- GoW usa el mismo generador ("semántica inmediata") y no lo vio: su microcódigo no lee Q dentro de la latencia.
+- **Fix (fork, generador):**
+  - Se guarda `qb<j> = s.q` antes de cada FDIV que tenga un lector cercano.
+  - Cada lector de Q a menos de la latencia elige entre `s.q` y `qb<j>` con `n.cyc[i] − n.cyc[j] ≥ latencia`. Es el
+    mismo mecanismo que ya usan los flags.
+  - Esos bloques piden la temporización exacta de entrada (bit 16).
+  - Basta un nivel, porque la FDIV es una sola unidad y el exacto detiene una DIV mientras la anterior está ocupada.
+  - Lo que queda sin cubrir es una DIV del **bloque anterior** todavía en vuelo al entrar
+    (`commitValuesKeepTiming` la aplica en el acto). No se observó ninguna discrepancia por eso.
+
+**Verificación** (`GOW_VU1N_VERIFY=3000`, título, 80 s):
+
+| | Sesión 13 | Tras 12a | Tras 12a + 12b |
+|---|---|---|---|
+| Discrepancias de memoria/paquetes, corridas 1–2000 | ~90 | **0** | **0** |
+| Ídem, corridas 2001–3000 | — | 64 (`0x1690`/`0x1a08` → bloque `0x1760`) | **0** |
+| Solo MAC final / clip final | ~510 | 602 | ~630 / 1 |
+
+- El MAC final ("solo cola") no llega al programa siguiente (sesión 13, `GOW_VU1_STARTMAC`). Hay que decidir con el
+  dev si se iguala.
+- Regresiones: Esc. 1 (1 override) y Esc. 2 (6 IRX `load-emulated`, MultiStream V7.1/V7.2) OK, y `ps2x_tests` del
+  fork da 451/453, los mismos 2 fallos de la base.
+
+**Rendimiento (abierto, nuevo):** en el título se miden **~17 flips/s** y la noria vuelve a desaparecer.
+
+- El A/B **sin** los cambios de esta sesión da lo mismo (~15-19 flips/s). Los ~30 de la sesión 13 no se reproducen,
+  aunque `settings.toml` (`render_scale = 1`, software) no ha cambiado.
+- Perfil con `PS2X_EEPROF=2`: el rasterizador SW se lleva ~35 % (`drawLine`, `sampleTexture`, `GSMem::ReadRow*`,
+  CLUT, `writePixel`). Le siguen `schedYield`/`eeCheckpointDue`/`dispatchGuestBranch` con ~18 % y la VU1 exacta con
+  ~3 %.
+- `GOW_VU1N_DIAG=1`: 246 entradas sin bloque nativo, por micromemorias aún no capturadas.
+
 ### Detalle del bloqueo 3c-bis — handlers DMAC reentrantes
 
 `sub_0048B708` es el handler DMAC de RenderWare (causas 1 VIF1 / 2 GIF y llamada directa con `a0=-1`
