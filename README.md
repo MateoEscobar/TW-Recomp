@@ -24,16 +24,26 @@ image** — this repository contains no game code, assets, or media.
 *The Warriors* (2005) is a beat 'em up / action game developed by Rockstar Leeds
 and published by Rockstar Games, based on the 1979 cult classic film. It runs on
 the **RenderWare 3.x** engine — the same engine used by GTA III, Vice City, and
-San Andreas on PS2 — and uses **Miles Sound System** for audio.
+San Andreas on PS2 — and uses **Sony MultiStream 7.1** for audio, running on the
+PS2's I/O processor (IOP).
 
 ## Screenshots
 
-<!-- Drop PNGs into docs/screenshots/ and uncomment:
-![Front-end](docs/screenshots/launcher.png)
-![Gameplay](docs/screenshots/gameplay.png)
--->
+**First boot screens rendered natively (2026-11-03, TWR-27).** The recompiled game now
+boots from the legal screen to the title screen, at ~20–30 fps on the software renderer.
+The game's own IOP modules run on the real IOP (no stubs).
 
-_Screenshots coming once the renderer is functional._
+| Legal screen | Memory card check |
+|:---:|:---:|
+| ![Legal screen](docs/screenshots/boot-01-legal.png) | ![Memory card check](docs/screenshots/boot-02-memcard-check.png) |
+| **Autosave notice** | **Title screen** |
+| ![Autosave notice](docs/screenshots/boot-03-autosave-notice.png) | ![Title screen](docs/screenshots/boot-04-title-screen.png) |
+
+> Work in progress:
+> - Colours are not final.
+> - A few title-screen glyphs are garbled.
+> - There is no audio output yet (TWR-30).
+> - Input past the title screen is the next milestone.
 
 ## Contents
 
@@ -48,6 +58,7 @@ _Screenshots coming once the renderer is functional._
 ## For players
 
 > **Note:** The project is in early development. There is no playable release yet.
+> The game currently boots to its title screen (see [Screenshots](#screenshots)).
 > This section will be updated when the first alpha build is available.
 
 ### Requirements (target)
@@ -81,8 +92,17 @@ projects are the primary reference for RenderWare internals on PS2:
 
 - [re3](https://github.com/halpz/re3) — GTA III (PS2, RenderWare 3.4)
 
-Audio is handled by **Miles Sound System** (Rad Game Tools), which requires its
-own stub/implementation layer (to be built in TWR-17).
+Audio is handled by **Sony MultiStream 7.1**. The EE talks to `MODULES/IOP.IRX` over
+SIF RPC `0x12345`; it is *not* Miles Sound System, as early tickets assumed. The game's
+original IRX modules (`SIO2MAN`, `PADMAN`, `LIBSD`, `IOP.IRX`, `MCMAN`, `MCSERV`) run
+unmodified on the `ps2xIOP` R3000 interpreter from PS2Recomp. An SPU2 core is ported
+from [god-of-war-recomp](https://github.com/KIexster/god-of-war-recomp), so music
+already streams internally; routing it to the host's speakers is TWR-30.
+
+VU1 microprograms (RenderWare's geometry pipeline) run on PS2Recomp's
+cycle-exact VU1 interpreter. See [`docs/boot.md`](docs/boot.md) for every boot blocker
+found so far, with its root cause and fix, and [`docs/iop.md`](docs/iop.md) for the IOP
+integration.
 
 ### Build requirements
 
@@ -120,6 +140,21 @@ cmake --build build --parallel
 See [`docs/BUILD.md`](docs/BUILD.md) for the full guide, including how to
 regenerate the recompiled sources from your own disc image.
 
+### Run (developer preview)
+
+```sh
+# 1. Once: extract the whole disc next to the ELF (games/warriors/, ~4 GB, ignored by git)
+python3 scripts/extract_iso.py "/path/to/Warriors, The (USA).iso" --all
+
+# 2. Run from the repository root, using the software renderer
+sed -i 's/^renderer = .*/renderer = "software"/' build/ps2xRuntime/savedata/settings.toml
+./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
+```
+
+The runtime resolves `cdrom0:` against the folder of the ELF, so `PS2X_CD_IMAGE` is not
+needed. The OpenGL path is opt-in (`PS2X_GPU=1`) until it is validated against the
+software renderer. Logs go to `logs/warriors.log` (or `PS2X_LOGFILE=<path>`).
+
 ---
 
 ## Progress
@@ -139,7 +174,7 @@ regenerate the recompiled sources from your own disc image.
 | TWR-10 | Extract and verify ELF from ISO (SLUS_212.15, SHA256 verified) | ✅ Done |
 | TWR-11 | ps2xAnalyzer → function map CSV, 122 SCE SDK stubs identified | ✅ Done |
 | TWR-12 | ps2xRecomp → 16,262 C++ source files generated, build verified | 🔍 In review |
-| TWR-13 | RenderWare + PS2 SDK stubs (sceXxx) | ⏳ Pending |
+| TWR-13 | RenderWare + PS2 SDK stubs (sceXxx) | ✅ Done — superseded (its BT3-derived overrides were removed in TWR-27) |
 
 ### Epic TWR-3 — Graphics (RenderWare 3.x)
 
@@ -153,9 +188,19 @@ regenerate the recompiled sources from your own disc image.
 
 | Ticket | Description | Status |
 |--------|-------------|--------|
-| TWR-17 | Miles Sound System → OpenAL/miniaudio | ⏳ Pending |
+| TWR-17 | Audio layer (originally scoped as Miles Sound System) | ✅ Done — superseded: audio is Sony MultiStream, see TWR-28 → TWR-31 |
 | TWR-18 | DualShock 2 → SDL2 GameController | ✅ Done |
 | TWR-19 | Memory card save/load → platform save dir (`%APPDATA%` / `~/.local/share`) | ✅ Done |
+
+### Real IOP & clean boot (TWR-28 → TWR-31)
+
+| Ticket | Description | Status |
+|--------|-------------|--------|
+| TWR-28 | Spike: run the game's IRX modules on `ps2xIOP` | ✅ Done |
+| TWR-29 | Integrate `ps2xIOP` into the runtime (SIF load/bind/call, IOP→EE RPC) | ✅ Merged |
+| TWR-27 | Clean boot with the real IOP — remove BT3 overrides, fix each blocker at its root cause | 🚧 In progress — boots to the title screen |
+| TWR-30 | SPU2 audio output to the host | ⏳ Pending |
+| TWR-31 | CD/WAD streaming + optional IOP ahead-of-time compilation | ⏳ Pending |
 
 ### Epic TWR-5 — Launcher & Distribution
 
@@ -183,17 +228,21 @@ regenerate the recompiled sources from your own disc image.
 | ELF extraction | ✅ Done | SLUS_212.15 verified (TWR-10) |
 | Function map | ✅ Done | 16,257 functions, 122 SCE stubs (TWR-11) |
 | C++ recompilation | 🔍 In review | 16,262 files, build 2072/2072 passes (TWR-12) |
-| PS2 SDK stubs | ⏳ Pending | TWR-13 |
-| RenderWare renderer | ⏳ Pending | TWR-14 |
-| Audio (MSS) | ⏳ Pending | TWR-17 |
-| Playable build | ⏳ Not yet | Blocked on renderer + audio |
+| IOP (real IRX modules) | ✅ Done | `ps2xIOP` interpreter, MultiStream answers RPC `0x12345` (TWR-29) |
+| Boot | 🚧 In progress | Legal → memory card → autosave → title screen (TWR-27) |
+| Rendering | 🚧 Partial | Software renderer draws the boot screens. Colours/glyphs WIP; OpenGL path opt-in (TWR-14) |
+| Audio (MultiStream + SPU2) | 🚧 Partial | Music streams inside the emulated IOP. No host output yet (TWR-30) |
+| Input | ⏳ Next | HLE of the game's own `libpad` → SDL2 (TWR-27 / TWR-18) |
+| Playable build | ⏳ Not yet | Next: main menu and a Rumble fight (TWR-27 DoD) |
 
 **Known challenges:**
 
-- RenderWare 3.x uses PS2-specific VU microcode for geometry transforms. These
-  must be emulated or rewritten for the PC renderer (reference: BT3-Recomp / re3).
-- Miles Sound System is proprietary and closed-source on PS2; its interface must
-  be reverse-engineered from the ELF.
+- RenderWare 3.x uses PS2-specific VU1 microcode for geometry transforms. It now
+  runs on PS2Recomp's cycle-exact VU1 interpreter. Ahead-of-time compilation of those
+  programs (as god-of-war-recomp does) is a later performance step.
+- The runtime was bootstrapped from BT3-Recomp and still carries subsystems written
+  for that game. They are being retired or fixed one by one, always compared against
+  upstream PS2Recomp and god-of-war-recomp (inventory in [`docs/boot.md`](docs/boot.md)).
 - The game has hardcoded 30fps logic in several gameplay systems. A 60fps patch
   requires identifying and patching timing constants (TWR-23).
 
@@ -208,7 +257,9 @@ TW-Recomp/
 ├── docs/
 │   ├── BUILD.md                # Build guide + recompilation stats
 │   ├── function-analysis.md    # ps2xAnalyzer output summary (TWR-11)
-│   └── screenshots/            # (empty until renderer works)
+│   ├── boot.md                 # Boot blockers: symptom, root cause, fix (TWR-27)
+│   ├── iop.md                  # Real IOP integration (ps2xIOP, TWR-29)
+│   └── screenshots/            # Progress screenshots
 ├── games/
 │   └── warriors/
 │       ├── warriors.toml       # ps2xRecomp config (stubs, patches, I/O paths)
@@ -222,7 +273,8 @@ TW-Recomp/
 │   └── src/
 │       ├── lib/                # Core runtime (PS2Runtime, scheduler, IOP…)
 │       ├── runner/             # Generated C++ sources (16,262 files — TWR-12)
-│       └── iop_native/         # IOP module stubs
+│       ├── frontend/           # ImGui launcher / settings
+│       └── gfx/                # Host graphics backend
 ├── ps2xAnalyzer/               # ELF analyzer (submodule)
 ├── scripts/
 │   └── extract_iso.py          # Extracts SLUS_212.15 from your ISO
@@ -234,8 +286,9 @@ TW-Recomp/
 
 ## Credits & license
 
-- **PS2Recomp** by [ran-j](https://github.com/ran-j/PS2Recomp) — PS2 static recompiler
-  and runtime. Licensed under MIT.
+- **PS2Recomp** by [ran-j](https://github.com/ran-j/PS2Recomp) — PS2 static recompiler,
+  runtime, `ps2xIOP` interpreter and cycle-exact VU1. Licensed under MIT.
+- **god-of-war-recomp** — SPU2 core and VU1 fixes ported into our PS2Recomp fork (GPLv3).
 - **re3** by the re3 team — RenderWare PS2 reference implementation.
 - *The Warriors* (2005) — © Rockstar Games / Rockstar Leeds. Game data is **not**
   distributed. You must supply your own legally obtained disc dump.
