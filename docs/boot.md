@@ -65,6 +65,7 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
 | — | "Rendimiento ~17 flips/s" abierto en la sesión 14 | **Descartado** (sesión 15) | Entorno: portátil en batería, perfil `balanced` (~1,1 GHz) | Con cargador y perfil `performance`: ~29-30 flips/s (tope del juego) y noria visible. Sin cambios de código |
 | 13 | Al confirmar las bandas en Rumble, bucle `No exact recompiled function for guest PC 0x1ef004` y `flips` congelado | **Resuelto** (sesión 15) | Recompilador: frontera de función en el delay slot del `JAL` de `0x1eeffc` (una constante `lui/ori` 0x1EF000 tomada por callback) | Fork `feature/TWR-27-function-bounds` (`55f7e10`): misma regla de delay slot que los punteros en datos; runner regenerado; guardia `tools/check_function_bounds.py` en CI |
 | 14 | Pelea Rumble: texturas del escenario y de los personajes con ruido de colores; ~8 flips/s | **Resuelto** (sesión 16; queda el rendimiento, ~11 flips/s) | GIF/VIF (d): PATH3 enmascarado se soltaba **entero** en el primer `MSKPATH3 0`. RW encola en el canal 2 las ~232 subidas del frame (un solo paquete DMA de ~69 000 qw) y por malla hace `FLUSHA / MSKPATH3 0 / MSKPATH3 1`: en el hardware pasa **un** paquete GIF (hasta EOP) por ventana. 58 huecos de VRAM se rellenan varias veces por frame → cada draw veía la última textura de su hueco (a veces otro PSM) | `releaseOneMaskedPath3Packet` (un paquete por ventana), `FLUSHA` con PATH3 abierto vacía la cola, continuación hasta EOP entre envíos DMA. `PS2X_P3_EOPMASK=0` = viejo. Además: caché multi-entrada de CLUT heredada de BT3 pasa a opt-in (`PS2X_CLUTMULTI=1`): servía una paleta rancia al logo "vs" |
+| 15 | Pelea Rumble: el personaje del jugador no se dibuja en ~50 % de los frames (su anillo sí); en algunos frames toda la geometría sale como polígonos gigantes | **Abierto** (sesión 17) | Sin aislar. Descartado: distancia de dibujado adaptativa (FPS forzado a 30), VU1 nativa (0 discrepancias de memoria/paquetes en la pelea) y el arreglo PATH3 de la sesión 16 (con `PS2X_P3_EOPMASK=0` también pasa). Sospecha: entrada de la VU1 (paquete o matrices pisadas en ese frame) | — |
 | — | Imagen que "salta arriba/abajo" (reporte del dev jugando a mano) | **No reproducido** (sesión 16) | `sceGsPutDispEnv` del stub escribía los dos circuitos y pisaba el DISPFB1/DISPLAY1 del juego cada frame (DBY 0↔1, DH 446↔447). Corregido, pero en capturas y vídeo a 60 fps (título, menú, presentación de la pelea; A/B) el salto es 0 con y sin el arreglo | Stub = rama real del ELF (`0x4AA748`): solo circuito 2 salvo `GParam.version == 1`. `PS2X_DISPENV_BOTH=1` = viejo. Pendiente: que el dev diga dónde lo ve |
 
 ### Detalle del bloqueo 2 — heap del kernel recortado
@@ -690,6 +691,42 @@ con DBY=1 (desde `sceGsPutDispEnv`) y DISPFB1 con DBY=0 escrito por el propio ju
 DISPFB1/DISPLAY1 del juego. Ahora sigue la rama real (`PS2X_DISPENV_BOTH=1` = viejo). Con `PS2X_PRIVWRITE` se ve que
 DISPFB1 ya solo alterna el búfer (fbp 0↔140) y DISPLAY1 no cambia. El salto vertical que vio el dev **no** se
 reproduce en ráfagas ni en vídeo a 60 fps, con ni sin el arreglo; falta saber en qué pantalla aparece.
+
+## Escenario 6 — pelea Rumble con input (sesión 17)
+
+Ruta por XTest (teclado): Enter (título, t≈46 s) → Abajo (QUICK RUMBLE) → ✕ (Game Mode: 1 ON 1) → ✕ (Game Type: 1P vs CPU)
+→ ✕ (Choose Gangs) → ✕ (Choose Area: Fight Pen) → carga (~30 s) → ✕ ("press ✕ to start"). Con poco FPS una pulsación
+de 0,12 s puede contar en dos pantallas seguidas, así que el script mira cada pantalla.
+
+- **Input:** el stick (WASD) mueve y gira al personaje, la cámara lo sigue y □ (Z) golpea. Capturas
+  `screenshots/boot-08-rumble-choose-gangs.png`, `boot-09-rumble-fight-start.png` y `boot-10-rumble-fight-input.png`.
+- **Estabilidad:** más de 4 minutos de pelea sin crash ni cuelgue, RSS estable (~410 MB), ~9-12 flips/s.
+- Durante la carga de Rumble (registro de 319 SFX, ~1 flip/s) salen 23 `[irqdefer] STALE` con el principal dentro del
+  handler DMAC (`dispPc=0x48b708`, `depth=1`). No aparecen durante la pelea ni causan fallos; queda anotado.
+
+### Bloqueo 15 — jugador invisible y polígonos gigantes en la pelea (abierto, sesión 17)
+
+En 12 capturas cada 1,5 s el personaje del jugador falta en 6 aunque su anillo "1" sí se dibuja
+(`screenshots/boot-11-rumble-player-missing-grid.png`). El rival falta a veces. En algunos frames **toda** la escena
+sale como polígonos enormes (`boot-12-rumble-exploded-polys.png`). Ya pasaba antes del arreglo PATH3: con
+`PS2X_P3_EOPMASK=0` se repite, con el ruido de texturas de antes.
+
+| A/B (mismo recorrido, cargador + `performance`) | Jugador ausente | Polígonos gigantes |
+|---|---|---|
+| Base | sí | sí |
+| FPS medido forzado a 30 en `0x40eb8c` (temporal) | sí | — |
+| `GOW_VU1N_VERIFY=3000` desde el segundo 125 (en la pelea) | sí | sí |
+| `PS2X_P3_EOPMASK=0` | sí | sí |
+
+- **No es la distancia de dibujado adaptativa** (bloqueo 10d): con el FPS forzado a 30 sigue pasando, y el jugador está
+  a pocas unidades, muy por debajo del alcance mínimo de 50.
+- **No es la VU1 nativa:** la verificación dentro de la pelea da 2000 lanzamientos con **0 discrepancias de memoria y
+  paquetes**. Solo difieren el MAC y el clip finales (31 casos), como en el título.
+- **Sospecha:** como la VU1 es exacta, la entrada de esos frames llega mal: un paquete o unas matrices pisados. Encaja
+  con una carrera entre el EE que rellena la lista DMA del frame siguiente y el DMA/VIF1 que aún consume la actual.
+  Siguiente paso: volcar con `PS2X_SEQ` o `addrwatch` las cabeceras `UNPACK` del modelo del jugador en un frame bueno
+  y en uno malo, y compararlas con upstream (`ps2_memory.cpp`, `transferTagData`) y con GoW.
+- Visto de paso: la tarjeta giratoria de "Choose Area" sale como un rombo gris plano con una barra negra. Sin revisar.
 
 ## Capa BT3 retirada en TWR-27
 
