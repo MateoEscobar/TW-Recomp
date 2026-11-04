@@ -3005,8 +3005,45 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 static uint64_t s_primRaw = 0, s_prmodeRaw = 0;
 std::atomic<unsigned long> g_regWriteHist[0x63];   // [rectemplate] state-register writes per register (PS2X_GUESTPROF=1)
 
+// [TWR-27 s16] PS2X_TEXSEQ=<s>: from <s> seconds after start, for 0.3 s, log in GS order every texture upload
+// (TRXDIR host->local: dbp/dpsm/size) and every TEX0 (tbp/psm/cbp), with the GIF path and the flip count, to see
+// whether a draw samples a slot before the upload that fills it arrives. Diagnostic only.
+extern uint8_t g_gifArbCurPath;
+extern std::atomic<uint64_t> g_ps2DisplayFlips;
+static void ps2xTexSeq(const GS *gs, uint8_t regAddr, uint64_t value, const GSBitBltBuf &bb, const GSTrxReg &tr)
+{
+    static const double s_t = [](){ const char *v = std::getenv("PS2X_TEXSEQ"); return v && v[0] ? std::atof(v) : -1.0; }();
+    if (s_t < 0.0 || (regAddr != 0x06 && regAddr != 0x07 && regAddr != 0x53)) return;
+    static const auto s_t0 = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_t0).count();
+    if (t < s_t || t > s_t + 0.3) return;
+    (void)gs;
+    const unsigned long long fl = (unsigned long long)g_ps2DisplayFlips.load(std::memory_order_relaxed);
+    if (regAddr == 0x53)
+    {
+        if ((value & 3u) == 0u)
+            std::fprintf(stderr, "[texseq] f=%llu p%u U dbp=%u dbw=%u dpsm=%02x %ux%u\n", fl, (unsigned)g_gifArbCurPath,
+                         bb.dbp, (unsigned)bb.dbw, (unsigned)bb.dpsm, (unsigned)tr.rrw, (unsigned)tr.rrh);
+    }
+    else
+        std::fprintf(stderr, "[texseq] f=%llu p%u T%u tbp=%u tbw=%u psm=%02x cbp=%u cld=%u\n", fl, (unsigned)g_gifArbCurPath,
+                     (unsigned)(regAddr - 0x06u + 1u), (unsigned)(value & 0x3FFFu), (unsigned)((value >> 14) & 0x3Fu),
+                     (unsigned)((value >> 20) & 0x3Fu), (unsigned)((value >> 37) & 0x3FFFu), (unsigned)((value >> 61) & 7u));
+}
+
+extern "C" void ps2xTexSeqEvent(const char *what, unsigned a, unsigned b)
+{   // [TWR-27 s16] same window as ps2xTexSeq, for VIF1/DMA events (MSKPATH3, FLUSHA, PATH3 release, MSCAL)
+    static const double s_t = [](){ const char *v = std::getenv("PS2X_TEXSEQ"); return v && v[0] ? std::atof(v) : -1.0; }();
+    if (s_t < 0.0) return;
+    static const auto s_t0 = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_t0).count();
+    if (t < s_t || t > s_t + 0.3) return;
+    std::fprintf(stderr, "[texseq] f=%llu ev %s %u %u\n", (unsigned long long)g_ps2DisplayFlips.load(std::memory_order_relaxed), what, a, b);
+}
+
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    ps2xTexSeq(this, regAddr, value, m_bitbltbuf, m_trxreg);
     {   // [recdirect] PS2X_GS_RECORD only tapped processGIFPacket, so GS registers written
         // DIRECTLY -- the kernel draw-environment stubs in Kernel/Stubs/GS.cpp and
         // Helpers/Support.h call gs().writeRegister() -- never reached the dump. FRAME, ZBUF,

@@ -392,6 +392,9 @@ public:
 
     bool isPath3Masked() const { return m_path3Masked; }
     void flushMaskedPath3Packets(bool drainImmediately = true);
+    // [TWR-27 s16] MSKPATH3 acts at GIF packet boundaries (EOP): an unmask->mask window lets ONE packet through.
+    void releaseOneMaskedPath3Packet();
+    static bool path3EopMaskEnabled();
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
@@ -485,6 +488,7 @@ public:
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
+    bool m_path3PassUntilEop = false;   // [TWR-27 s16] the released packet continues in data not yet received
 
     struct PendingTransfer
     {

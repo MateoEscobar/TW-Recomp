@@ -2325,35 +2325,49 @@ namespace
         if (!runtime || !runtime->syncCoreSubsystems())
             return;
         const GsDispEnvMem e = env;
+        // [TWR-27 s16] Like libgraph's real sceGsPutDispEnv (Warriors 0x4AA748, disassembled): on a normal GS
+        // (GParam.version != 1) it programs PMODE, SMODE2, DISPFB2, DISPLAY2 and BGCOLOR -- read circuit 2 ONLY.
+        // Circuit 1 belongs to the game: Warriors (like GoW) programs DISPFB1/DISPLAY1 itself for the two-circuit
+        // anti-flicker merge (DISPFB2.DBY=1 vs DISPFB1.DBY=0). Writing both circuits here (upstream does) clobbered
+        // the game's DISPFB1/DISPLAY1 every frame -> DBY 0<->1 and DH 446<->447 alternated -> image jumping.
+        // PS2X_DISPENV_BOTH=1 restores the old both-circuits write (A/B only).
+        static const bool s_both = [](){ const char *v = std::getenv("PS2X_DISPENV_BOTH"); return v && v[0] && v[0] != '0'; }();
+        if (s_both)
+        {
+            auto &regs = runtime->memory().gs();
+            regs.pmode = e.pmode; regs.smode2 = e.smode2; regs.dispfb1 = e.dispfb; regs.display1 = e.display;
+            regs.dispfb2 = e.dispfb; regs.display2 = e.display; regs.bgcolor = e.bgcolor;
+            ps2xGsDisplayFlipHook(e.dispfb);
+            return;
+        }
+        const bool circuit1 = (g_gparam.version == 1u);   // old-GS branch of the real function
         if (PS2Memory::stage1FenceEnabled())
         {   // [s1fence] the display env is a stream event like the game's own bus stores: the live block is written
             // now (the guest may read it back), the presenter's stream block when stage 2 gets there, in order
             // with the frame it belongs to. No drain.
             auto &regs = runtime->memory().gs();
-            regs.pmode = e.pmode; regs.smode2 = e.smode2; regs.dispfb1 = e.dispfb; regs.display1 = e.display;
-            regs.dispfb2 = e.dispfb; regs.display2 = e.display; regs.bgcolor = e.bgcolor;
+            regs.pmode = e.pmode; regs.bgcolor = e.bgcolor;
+            if (circuit1) { regs.dispfb1 = e.dispfb; regs.display1 = e.display; }
+            else { regs.smode2 = e.smode2; regs.dispfb2 = e.dispfb; regs.display2 = e.display; }
             PS2Memory::KickJob j; j.kind = PS2Memory::KickJob::GsApply;
-            j.fn = [e]()
+            j.fn = [e, circuit1]()
             {
-                ps2x_pgs::streamPriv(0x00u, e.pmode);   ps2x_pgs::streamPriv(0x20u, e.smode2);
-                ps2x_pgs::streamPriv(0x70u, e.dispfb);  ps2x_pgs::streamPriv(0x80u, e.display);
-                ps2x_pgs::streamPriv(0x90u, e.dispfb);  ps2x_pgs::streamPriv(0xA0u, e.display);
+                ps2x_pgs::streamPriv(0x00u, e.pmode);
+                if (circuit1) { ps2x_pgs::streamPriv(0x70u, e.dispfb); ps2x_pgs::streamPriv(0x80u, e.display); }
+                else { ps2x_pgs::streamPriv(0x20u, e.smode2); ps2x_pgs::streamPriv(0x90u, e.dispfb); ps2x_pgs::streamPriv(0xA0u, e.display); }
                 ps2x_pgs::streamPriv(0xE0u, e.bgcolor);
                 ps2xGsDisplayFlipHook(e.dispfb);   // [displatch]
             };
             runtime->memory().enqueueKickJob(std::move(j));
             return;
         }
-        applyGsOnStream(runtime, [runtime, e]()
+        applyGsOnStream(runtime, [runtime, e, circuit1]()
         {
             auto &regs = runtime->memory().gs();
             regs.pmode = e.pmode;
-            regs.smode2 = e.smode2;
-            regs.dispfb1 = e.dispfb;
-            regs.display1 = e.display;
-            regs.dispfb2 = e.dispfb;
-            regs.display2 = e.display;
             regs.bgcolor = e.bgcolor;
+            if (circuit1) { regs.dispfb1 = e.dispfb; regs.display1 = e.display; }
+            else { regs.smode2 = e.smode2; regs.dispfb2 = e.dispfb; regs.display2 = e.display; }
             ps2xGsDisplayFlipHook(e.dispfb);   // [displatch] the present's per-frame latch (ps2_gs_gpu.cpp)
         });
     }

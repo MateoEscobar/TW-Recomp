@@ -745,19 +745,28 @@ void GSRasterizer::drawPrimitive(GS *gs)
         {
             static std::mutex swm;
             static std::set<uint32_t> swSeen;
+            static std::map<uint32_t, uint32_t> swUses;   // [TWR-27 s16] PS2X_SWTEXDUMP_NTH: dump at the Nth draw of a key
+            static const uint32_t s_swNth = [](){ const char *v = std::getenv("PS2X_SWTEXDUMP_NTH"); return v && v[0] ? (uint32_t)std::atoi(v) : 1u; }();
             const auto &t = ctx.tex0;
             const uint32_t key = (t.tbp0 << 8) | (static_cast<uint32_t>(t.psm) & 0xFFu);
             std::lock_guard<std::mutex> lk(swm);
             const int W = 1 << t.tw, H = 1 << t.th;
-            if (swSeen.size() < 96u && !swSeen.count(key) && W >= 1 && H >= 1 && W <= 1024 && H <= 1024)
+            // [TWR-27 s16] PS2X_SWTEXDUMP_DIR (default ".") and PS2X_SWTEXDUMP_AFTER=<s> (skip the boot/menu textures)
+            static const char *s_swDir = [](){ const char *v = std::getenv("PS2X_SWTEXDUMP_DIR"); return v && v[0] ? v : "."; }();
+            static const auto s_swT0 = std::chrono::steady_clock::now();
+            static const double s_swAfter = [](){ const char *v = std::getenv("PS2X_SWTEXDUMP_AFTER"); return v && v[0] ? std::atof(v) : 0.0; }();
+            const bool swLate = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_swT0).count() >= s_swAfter &&
+                                ++swUses[key] >= s_swNth;
+            if (swLate && swSeen.size() < 96u && !swSeen.count(key) && W >= 1 && H >= 1 && W <= 1024 && H <= 1024)
             {
                 swSeen.insert(key);
                 const uint32_t savedFst = gs->m_prim.fst;
                 gs->m_prim.fst = 1u; // force FST so sampleTexture uses the (u,v) texel path
-                char path[256];
+                char path[384];
                 std::snprintf(path, sizeof(path),
-                              "/home/z3/Desktop/warriors/texdump/tex_tbp%05u_psm%02x_%dx%d.bmp",
-                              t.tbp0, static_cast<uint32_t>(t.psm) & 0xFFu, W, H);
+                              "%s/tex_tbp%05u_psm%02x_%dx%d_tbw%u_cbp%u_cpsm%u_csm%u_csa%u.bmp",
+                              s_swDir, t.tbp0, static_cast<uint32_t>(t.psm) & 0xFFu, W, H, t.tbw, t.cbp,
+                              static_cast<uint32_t>(t.cpsm), static_cast<uint32_t>(t.csm), static_cast<uint32_t>(t.csa));
                 FILE *bf = std::fopen(path, "wb");
                 if (bf)
                 {
@@ -2903,7 +2912,11 @@ void GSRasterizer::ensureClutCache(GS *gs)
     // ~0 sentinel in m_clutCacheKey -> drop every entry (a writeback also bumps the page gens in the key). PS2X_CLUTMULTI=0 disables.
     struct ClutMulti { uint64_t key; uint64_t h16, h256; uint32_t tbl[256]; };
     static ClutMulti s_cm[64] = {};
-    static const bool s_cmOn = [](){ const char *v = std::getenv("PS2X_CLUTMULTI"); return !(v && v[0] == '0'); }();
+    // [TWR-27 s16] OPT-IN now (PS2X_CLUTMULTI=1). Inherited BT3 optimisation (upstream has none): once Warriors' PATH3
+    // uploads are interleaved with the draws (one packet per MSKPATH3 window, as on hardware), an entry built for an
+    // earlier palette in the same slot was served again -> the Rumble "vs" logo drawn with a 3D texture's palette.
+    // The exact stale path is not isolated yet; with it off the fight measures the same ~11 flips/s.
+    static const bool s_cmOn = [](){ const char *v = std::getenv("PS2X_CLUTMULTI"); return v && v[0] && v[0] != '0'; }();
     const unsigned cmSlot = (unsigned)((key * 0x9E3779B97F4A7C15ull) >> 58) & 62u;   // even slot; +1 = its 2-way partner
     if (s_cmOn)
     {

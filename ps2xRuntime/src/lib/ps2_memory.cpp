@@ -1,3 +1,4 @@
+extern "C" void ps2xTexSeqEvent(const char *what, unsigned a, unsigned b);   // [TWR-27 s16] ps2_gs_gpu.cpp
 #include "runtime/ps2_seamprobe.h"  // [kickprobe]
 #include "ps2_waitprof.h"   // [waitprof]
 #include "runtime/ps2_memory.h"
@@ -1122,6 +1123,20 @@ static void ps2xPrivInStream(PS2Memory *mem, uint32_t regOff, uint64_t value)
     mem->enqueueKickJob(std::move(j));
 }
 
+// [TWR-27 s16] PS2X_PRIVWRITE=N: log the first N CHANGED bus stores to the display registers (PMODE, SMODE2,
+// DISPFB1/2, DISPLAY1/2) with the vsync tick, to diagnose per-field display offsets (image jumping up/down).
+static void ps2xPrivLog(uint32_t regOff, uint64_t oldVal, uint64_t newVal)
+{
+    static const long s_max = [](){ const char *v = std::getenv("PS2X_PRIVWRITE"); return v ? std::atol(v) : 0L; }();
+    if (s_max <= 0 || oldVal == newVal) return;
+    if (regOff != 0x00u && regOff != 0x20u && regOff != 0x70u && regOff != 0x80u && regOff != 0x90u && regOff != 0xA0u) return;
+    static std::atomic<long> s_n{0};
+    if (s_n.fetch_add(1) >= s_max) return;
+    std::fprintf(stderr, "[privwrite] ms=%llu reg=0x%02x 0x%016llx -> 0x%016llx\n",
+                 (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), regOff,
+                 (unsigned long long)oldVal, (unsigned long long)newVal);
+}
+
 void PS2Memory::write32(uint32_t address, uint32_t value)
 {
     if (address & 3)
@@ -1144,6 +1159,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             uint64_t mask = 0xFFFFFFFFULL << (off * 8);
             uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
             const bool changed = (newVal != *reg);
+            ps2xPrivLog(regOff, *reg, newVal);
             *reg = newVal;
             ps2x_pgs::privWrite(regOff, newVal, &gs_regs);   // [pgs]
             if (regOff == 0x70u)
@@ -1212,6 +1228,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
             const bool changed = (value != *reg);
+            ps2xPrivLog(regOff, *reg, value);
             *reg = value;
             ps2x_pgs::privWrite(regOff, value, &gs_regs);   // [pgs]
             if (regOff == 0x70u)
@@ -3356,6 +3373,69 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     return causes;
 }
 
+// [TWR-27 s16] Byte length of the leading GIF packet of d[0..n): every tag up to and including the first one with EOP,
+// with its payload. Returns n (and sets complete=false) when the data ends before that EOP.
+static size_t ps2xGifPacketLength(const uint8_t *d, size_t n, bool &complete)
+{
+    size_t o = 0;
+    while (o + 16u <= n)
+    {
+        uint64_t lo = 0;
+        std::memcpy(&lo, d + o, 8);
+        const uint64_t nloop = lo & 0x7FFFu;
+        const bool eop = ((lo >> 15) & 1u) != 0u;
+        const uint32_t flg = static_cast<uint32_t>((lo >> 58) & 3u);
+        uint64_t nreg = (lo >> 60) & 0xFu;
+        if (nreg == 0u) nreg = 16u;
+        const uint64_t payload = flg == 0u ? nloop * nreg * 16u : flg == 1u ? ((nloop * nreg * 8u + 15u) & ~15ull) : nloop * 16u;
+        o += 16u + static_cast<size_t>(payload);
+        if (eop) { complete = o <= n; return std::min(o, n); }
+    }
+    complete = false;
+    return n;
+}
+
+bool PS2Memory::path3EopMaskEnabled()
+{   // PS2X_P3_EOPMASK=0 restores the old behaviour (an unmask releases the whole queue) for A/B
+    static const bool s_on = [](){ const char *v = std::getenv("PS2X_P3_EOPMASK"); return !(v && v[0] == '0'); }();
+    return s_on;
+}
+
+// [TWR-27 s16] Hardware (PCSX2 Vif_Codes/Gif_Unit): MSKPATH3 is honoured at the end of the PATH3 packet in flight, and
+// FLUSHA waits for PATH3 to go idle. RenderWare (Warriors) queues a whole frame of texture uploads on DMA channel 2
+// (~232 uploads, one chain) with PATH3 masked, then per mesh issues FLUSHA / MSKPATH3 0 / MSKPATH3 1: exactly one
+// upload packet gets through before its draws, and the same VRAM slot is refilled for the next mesh. Releasing the
+// whole queue at the first unmask applied every upload before every draw -> draws sampled the last texture put in
+// their slot (noise / wrong palette, often another PSM). Here an unmask releases ONE packet (up to EOP).
+void PS2Memory::releaseOneMaskedPath3Packet()
+{
+    if (m_path3MaskedFifo.empty())
+        return;
+    if (m_path3MaskedFifo.size() > 1u)
+    {   // the packet may span DMA submissions: work on the concatenated queue
+        std::vector<uint8_t> all;
+        for (const auto &p : m_path3MaskedFifo) all.insert(all.end(), p.begin(), p.end());
+        m_path3MaskedFifo.clear();
+        m_path3MaskedFifo.push_back(std::move(all));
+    }
+    std::vector<uint8_t> &q = m_path3MaskedFifo.front();
+    bool complete = false;
+    const size_t len = ps2xGifPacketLength(q.data(), q.size(), complete);
+    if (len >= 16u)
+    {
+        if (m_gifArbiter)
+            m_gifArbiter->submit(GifPathId::Path3, q.data(), static_cast<uint32_t>(len), false);
+        else if (m_gifPacketCallback)
+            m_gifPacketCallback(q.data(), static_cast<uint32_t>(len));
+    }
+    m_path3PassUntilEop = !complete;
+    if (len >= q.size()) m_path3MaskedFifo.clear();
+    else q.erase(q.begin(), q.begin() + static_cast<std::ptrdiff_t>(len));
+    uint32_t qwc = 0u;
+    for (const auto &p : m_path3MaskedFifo) qwc += static_cast<uint32_t>(p.size() / 16u);
+    m_path3MaskedQwc.store(qwc, std::memory_order_relaxed);
+}
+
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
     if (m_path3Masked || m_path3MaskedFifo.empty())
@@ -3429,6 +3509,17 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 
     if (pathId == GifPathId::Path3)
     {
+        ps2xTexSeqEvent(m_path3Masked ? "P3queued" : "P3direct", sizeBytes / 16u, 0u);
+        if (m_path3Masked && m_path3PassUntilEop && path3EopMaskEnabled() && m_path3MaskedFifo.empty())
+        {   // [TWR-27 s16] the packet released at the last unmask continues here: it passes up to its EOP
+            bool complete = false;
+            const size_t len = ps2xGifPacketLength(data, sizeBytes, complete);
+            m_path3PassUntilEop = !complete;
+            if (m_gifArbiter) m_gifArbiter->submit(GifPathId::Path3, data, static_cast<uint32_t>(len), false);
+            else if (m_gifPacketCallback) m_gifPacketCallback(data, static_cast<uint32_t>(len));
+            if (len >= sizeBytes) return;
+            data += len; sizeBytes -= static_cast<uint32_t>(len);
+        }
         if (m_path3Masked)
         {
             m_path3MaskedFifo.emplace_back(data, data + sizeBytes);

@@ -1,3 +1,4 @@
+extern "C" void ps2xTexSeqEvent(const char *what, unsigned a, unsigned b);   // [TWR-27 s16] ps2_gs_gpu.cpp
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_guestprof.h"
 #include <cstdio>
@@ -502,8 +503,17 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
+            ps2xTexSeqEvent("MSKPATH3", m_path3Masked ? 1u : 0u, static_cast<unsigned>(m_path3MaskedFifo.size()));
             if (wasMasked && !m_path3Masked)
-                flushMaskedPath3Packets();
+            {
+                if (path3EopMaskEnabled())
+                {   // [TWR-27 s16] one PATH3 packet per unmask window (see releaseOneMaskedPath3Packet)
+                    releaseOneMaskedPath3Packet();
+                    if (m_gifArbiter) arbiterDrainOrHandoff();
+                }
+                else
+                    flushMaskedPath3Packets();
+            }
             continue;
         }
         else if (opcode == VIF_MARK)
@@ -514,6 +524,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
+            ps2xTexSeqEvent(opcode == VIF_FLUSHA ? "FLUSHA" : (opcode == VIF_FLUSH ? "FLUSH" : "FLUSHE"), 0u, 0u);
+            // [TWR-27 s16] FLUSHA waits for PATH3: while it is unmasked the queued uploads all go through first
+            if (opcode == VIF_FLUSHA && !m_path3Masked && path3EopMaskEnabled() && !m_path3MaskedFifo.empty())
+                flushMaskedPath3Packets();
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)

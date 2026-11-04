@@ -7612,6 +7612,14 @@ void PS2Runtime::run()
                         const std::string tmp = std::string(s_shotDir) + "/shot.tmp.png", dst = std::string(s_shotDir) + "/shot.png";
                         warriorsExportImage(im, tmp.c_str()); warriorsUnloadImage(im);
                         std::filesystem::rename(tmp, dst, ec);
+                        // [TWR-27 s16] PS2X_SHOT_VRAM=1: also save the 4 MB of GS local memory (shot_vram.bin) so
+                        // textures can be decoded offline at the same moment (diagnostic; unsynchronised read).
+                        static const bool s_shotVram = [](){ const char *v = std::getenv("PS2X_SHOT_VRAM"); return v && v[0] && v[0] != '0'; }();
+                        if (s_shotVram && m_memory.getGSVRAM())
+                        {
+                            const std::string vp = std::string(s_shotDir) + "/shot_vram.bin";
+                            if (FILE *vf = std::fopen(vp.c_str(), "wb")) { std::fwrite(m_memory.getGSVRAM(), 1, PS2_GS_VRAM_SIZE, vf); std::fclose(vf); }
+                        }
                     }
                 }
             }
