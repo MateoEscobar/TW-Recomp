@@ -1,0 +1,327 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index e69d622..595c85e 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -380,6 +380,9 @@ public:
+ 
+     bool isPath3Masked() const { return m_path3Masked; }
+     void flushMaskedPath3Packets(bool drainImmediately = true);
++    // TWR: MSKPATH3 0 lets ONE queued PATH3 GIF packet through (up to its EOP), as on hardware; see ps2_memory.cpp.
++    void releaseOneMaskedPath3Packet();
++    static bool path3EopMaskEnabled();
+ 
+     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
+     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
+@@ -480,6 +483,13 @@ public:
+     std::vector<uint8_t> m_vif1DirectPayload; // como máximo 65536 QW (1 MiB)
+     void submitVif1DirectPayload(const uint8_t *data, uint32_t sizeBytes, bool directHl);
+     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
++    // TWR: PATH3 packet cursor for the one-packet-per-unmask release.
++    size_t m_path3MaskedHead = 0u;       // bytes of m_path3MaskedFifo.front() already released
++    uint32_t m_path3EopPayload = 0u;     // payload bytes left in the current GIFtag of the released packet
++    bool m_path3EopPending = false;      // that GIFtag has EOP: the packet ends with its payload
++    bool m_path3PassUntilEop = false;    // the released packet continues in later submissions
++    size_t path3PacketSpan(const uint8_t *data, size_t sizeBytes, bool &ended);
++    void resetPath3PacketCursor();
+ 
+     struct GsWorkerItem
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index ad1d661..b54599f 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -327,6 +327,7 @@ bool PS2Memory::initialize(size_t ramSize)
+     m_codeRegions.clear();
+     m_path3Masked = false;
+     m_path3MaskedFifo.clear();
++    resetPath3PacketCursor();
+     // GOW-Port: descartar cualquier DIRECT incompleto al inicializar VIF1.
+     m_vif1DirectBytesRemaining = 0u;
+     m_vif1DirectHl = false;
+@@ -2215,17 +2216,122 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
+             m_gifPacketCallback(packetData, packetSize);
+     };
+ 
+-    for (const auto &packet : m_path3MaskedFifo)
++    for (size_t i = 0u; i < m_path3MaskedFifo.size(); ++i)
+     {
+-        if (packet.size() >= 16u)
+-            emit(packet.data(), static_cast<uint32_t>(packet.size()));
++        const auto &packet = m_path3MaskedFifo[i];
++        const size_t head = i == 0u ? std::min(m_path3MaskedHead, packet.size()) : 0u; // TWR: part already released
++        if (packet.size() - head >= 16u)
++            emit(packet.data() + head, static_cast<uint32_t>(packet.size() - head));
+     }
+     m_path3MaskedFifo.clear();
++    resetPath3PacketCursor();
+ 
+     if (m_gifArbiter && drainImmediately)
+         m_gifArbiter->drain();
+ }
+ 
++// TWR: PATH3 packet cursor. Walks GIFtags (data is qword aligned: DMA submissions) and returns how many bytes of
++// data belong to the packet being released; ended = its EOP tag and payload are complete within data.
++size_t PS2Memory::path3PacketSpan(const uint8_t *data, size_t sizeBytes, bool &ended)
++{
++    ended = false;
++    size_t offset = 0u;
++    while (offset < sizeBytes)
++    {
++        if (m_path3EopPayload != 0u)
++        {
++            const size_t bytes = std::min<size_t>(m_path3EopPayload, sizeBytes - offset);
++            m_path3EopPayload -= static_cast<uint32_t>(bytes);
++            offset += bytes;
++            if (m_path3EopPayload == 0u && m_path3EopPending)
++            {
++                m_path3EopPending = false;
++                ended = true;
++                return offset;
++            }
++            continue;
++        }
++        if (sizeBytes - offset < 16u)
++            return sizeBytes;
++        uint64_t lo = 0u;
++        std::memcpy(&lo, data + offset, sizeof(lo));
++        offset += 16u;
++        const uint32_t loops = static_cast<uint32_t>(lo & 0x7FFFu);
++        const bool eop = ((lo >> 15u) & 1u) != 0u;
++        const uint32_t format = static_cast<uint32_t>((lo >> 58u) & 3u);
++        uint32_t nreg = static_cast<uint32_t>((lo >> 60u) & 15u);
++        if (nreg == 0u)
++            nreg = 16u;
++        m_path3EopPayload = format == 0u ? loops * nreg * 16u
++                          : format == 1u ? ((loops * nreg + 1u) / 2u) * 16u
++                                         : loops * 16u;
++        m_path3EopPending = eop;
++        if (eop && m_path3EopPayload == 0u)
++        {
++            m_path3EopPending = false;
++            ended = true;
++            return offset;
++        }
++    }
++    return offset;
++}
++
++void PS2Memory::resetPath3PacketCursor()
++{
++    m_path3MaskedHead = 0u;
++    m_path3EopPayload = 0u;
++    m_path3EopPending = false;
++    m_path3PassUntilEop = false;
++}
++
++bool PS2Memory::path3EopMaskEnabled()
++{
++    // PS2X_P3_EOPMASK=0: the old behaviour (an unmask releases the whole queue), for A/B comparisons.
++    static const bool enabled = []
++    {
++        const char *value = std::getenv("PS2X_P3_EOPMASK");
++        return !(value && value[0] == '0');
++    }();
++    return enabled;
++}
++
++// TWR: on hardware (PCSX2 Vif_Codes.cpp / Gif_Unit.h) MSKPATH3 takes effect at the end of the PATH3 packet in flight,
++// so each MSKPATH3 0 / MSKPATH3 1 window lets exactly one GIF packet (up to EOP) through, and FLUSHA waits for PATH3.
++// RenderWare (The Warriors) queues a frame of texture uploads on DMA channel 2 (~232 uploads, ~69000 qw) with PATH3
++// masked and, per mesh, issues FLUSHA / MSKPATH3 0 / MSKPATH3 1, reusing the same VRAM slots: releasing the whole
++// queue at the first unmask drew every mesh with the last texture put in its slot (noise / foreign palettes).
++// Slices are emitted in place (no concatenation): the GIF arbiter follows GIFtags across submissions.
++void PS2Memory::releaseOneMaskedPath3Packet()
++{
++    syncGsWorkerIfOtherThread("releaseOneMaskedPath3Packet");
++    if (m_path3MaskedFifo.empty())
++        return; // nothing queued: no packet is in flight, the next masked submission must be queued
++    bool ended = false;
++    while (!m_path3MaskedFifo.empty() && !ended)
++    {
++        const std::vector<uint8_t> &packet = m_path3MaskedFifo.front();
++        const size_t head = std::min(m_path3MaskedHead, packet.size());
++        const size_t length = path3PacketSpan(packet.data() + head, packet.size() - head, ended);
++        if (length != 0u)
++        {
++            if (m_gifArbiter)
++                m_gifArbiter->submit(GifPathId::Path3, packet.data() + head, static_cast<uint32_t>(length), false);
++            else if (m_gifPacketCallback)
++                m_gifPacketCallback(packet.data() + head, static_cast<uint32_t>(length));
++        }
++        m_path3MaskedHead = head + length;
++        if (m_path3MaskedHead >= packet.size())
++        {
++            m_path3MaskedFifo.erase(m_path3MaskedFifo.begin());
++            m_path3MaskedHead = 0u;
++        }
++    }
++    // The packet did not end inside the queue: its rest passes when the DMA delivers it, even if masked again.
++    m_path3PassUntilEop = !ended;
++    if (m_gifArbiter)
++        m_gifArbiter->drain();
++}
++
+ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
+ {
+     syncGsWorkerIfOtherThread("submitGifPacket");
+@@ -2236,6 +2342,25 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t
+     {
+         if (m_path3Masked)
+         {
++            if (m_path3PassUntilEop && m_path3MaskedFifo.empty() && path3EopMaskEnabled())
++            {
++                // TWR: rest of the packet released at the last unmask: it goes through up to its EOP.
++                bool ended = false;
++                const size_t length = path3PacketSpan(data, sizeBytes, ended);
++                m_path3PassUntilEop = !ended;
++                if (m_gifArbiter)
++                    m_gifArbiter->submit(GifPathId::Path3, data, static_cast<uint32_t>(length), false);
++                else if (m_gifPacketCallback)
++                    m_gifPacketCallback(data, static_cast<uint32_t>(length));
++                if (m_gifArbiter && drainImmediately)
++                    m_gifArbiter->drain();
++                if (length >= sizeBytes)
++                    return;
++                data += length;
++                sizeBytes -= static_cast<uint32_t>(length);
++                if (sizeBytes < 16u)
++                    return;
++            }
+             m_path3MaskedFifo.emplace_back(data, data + sizeBytes);
+             return;
+         }
+@@ -2358,6 +2483,7 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+         uint64_t parkedBytes = 0u;
+         for (const auto &packet : m_path3MaskedFifo)
+             parkedBytes += packet.size();
++        parkedBytes -= std::min<uint64_t>(parkedBytes, m_path3MaskedHead);
+         const uint32_t fqc = static_cast<uint32_t>(std::min<uint64_t>(16u, parkedBytes / 16u));
+         stat = (stat & ~0x1F000000u) | (fqc << 24u);
+         return stat;
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index befe135..b2ba660 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -97,6 +97,9 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
+         }
+         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
+         {
++            // TWR: FLUSHA waits for PATH3 to go idle: with PATH3 open, everything queued goes through first.
++            if (opcode == VIF_FLUSHA && !m_path3Masked && !m_path3MaskedFifo.empty() && path3EopMaskEnabled())
++                flushMaskedPath3Packets();
+             continue;
+         }
+         else if (opcode == VIF_STMASK)
+@@ -380,7 +383,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             const bool wasMasked = m_path3Masked;
+             m_path3Masked = (imm & 0x8000u) != 0u;
+             if (wasMasked && !m_path3Masked)
+-                flushMaskedPath3Packets();
++            {
++                // TWR: one PATH3 packet per unmask window (PS2Memory::releaseOneMaskedPath3Packet).
++                if (path3EopMaskEnabled())
++                    releaseOneMaskedPath3Packet();
++                else
++                    flushMaskedPath3Packets();
++            }
+             continue;
+         }
+         else if (opcode == VIF_MARK)
+@@ -391,6 +400,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+         }
+         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
+         {
++            // TWR: FLUSHA waits for PATH3 to go idle: with PATH3 open, everything queued goes through first.
++            if (opcode == VIF_FLUSHA && !m_path3Masked && !m_path3MaskedFifo.empty() && path3EopMaskEnabled())
++                flushMaskedPath3Packets();
+             continue;
+         }
+         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index dce648d..8d54727 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -1214,6 +1214,83 @@ void register_ps2_memory_tests()
+             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
+         });
+ 
++        tc.Run("PATH3 unmask releases one GIF packet per MSKPATH3 window", [](TestCase &t)
++        {
++            // TWR: RenderWare queues a frame of texture uploads with PATH3 masked and opens one MSKPATH3 0/1 window
++            // per mesh; on hardware each window lets one packet (up to EOP) through and FLUSHA waits for PATH3.
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            size_t emittedBytes = 0u;
++            mem.setGifPacketCallback([&](const uint8_t *, uint32_t sizeBytes) { emittedBytes += sizeBytes; });
++
++            // IMAGE GIFtag with NLOOP qwords of payload.
++            const auto appendImage = [](std::vector<uint8_t> &out, uint32_t loops, bool eop, uint8_t fill)
++            {
++                const uint64_t lo = static_cast<uint64_t>(loops) | (eop ? (1ull << 15u) : 0u) | (2ull << 58u);
++                std::array<uint8_t, 16u> tag{};
++                std::memcpy(tag.data(), &lo, sizeof(lo));
++                out.insert(out.end(), tag.begin(), tag.end());
++                out.insert(out.end(), static_cast<size_t>(loops) * 16u, fill);
++            };
++            const auto mask = [&](bool on)
++            {
++                const uint32_t cmd = makeVifCmd(0x06u, 0u, on ? 0x8000u : 0x0000u);
++                mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&cmd), sizeof(cmd));
++            };
++            const auto fqc = [&] { return (mem.readIORegister(0x10003020u) >> 24) & 0x1Fu; };
++
++            // An unmask with nothing queued opens no packet: the next masked upload is queued (Warriors spins at
++            // 0x48B9A8 until GIF_STAT.FQC sees it).
++            mask(true);
++            mask(false);
++            std::vector<uint8_t> parked;
++            appendImage(parked, 1u, true, 0x01u);
++            mask(true);
++            mem.submitGifPacket(GifPathId::Path3, parked.data(), static_cast<uint32_t>(parked.size()));
++            t.Equals(emittedBytes, static_cast<size_t>(0u), "an empty unmask window must not let later uploads through");
++            t.Equals(fqc(), 2u, "the masked upload is visible in GIF_STAT.FQC");
++            mask(false);
++            t.Equals(emittedBytes, static_cast<size_t>(32u), "the parked upload takes the next window");
++            emittedBytes = 0u;
++
++            std::vector<uint8_t> chain;
++            appendImage(chain, 1u, true, 0x11u);  // packet 1: 32 bytes
++            appendImage(chain, 1u, false, 0x22u); // packet 2: two tags, 64 bytes
++            appendImage(chain, 1u, true, 0x23u);
++            appendImage(chain, 2u, true, 0x33u);  // packet 3: 48 bytes
++            mask(true);
++            mem.submitGifPacket(GifPathId::Path3, chain.data(), static_cast<uint32_t>(chain.size()));
++            t.Equals(emittedBytes, static_cast<size_t>(0u), "masked uploads stay queued");
++
++            mask(false);
++            t.Equals(emittedBytes, static_cast<size_t>(32u), "the first window releases only the first packet");
++            mask(true);
++            t.Equals(fqc(), 7u, "GIF_STAT.FQC counts only what is still queued");
++            mask(false);
++            t.Equals(emittedBytes, static_cast<size_t>(96u), "the next window releases the whole two-tag packet");
++            const uint32_t flusha = makeVifCmd(0x13u, 0u, 0u);
++            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&flusha), sizeof(flusha));
++            t.Equals(emittedBytes, static_cast<size_t>(144u), "FLUSHA with PATH3 open drains the queue");
++
++            // A packet split across two DMA submissions: its tail passes on arrival even if PATH3 was masked again.
++            emittedBytes = 0u;
++            std::vector<uint8_t> head;
++            appendImage(head, 3u, true, 0x44u);
++            head.resize(32u); // tag + first qword; two qwords arrive later
++            mask(true);
++            mem.submitGifPacket(GifPathId::Path3, head.data(), static_cast<uint32_t>(head.size()));
++            mask(false);
++            mask(true);
++            t.Equals(emittedBytes, static_cast<size_t>(32u), "the window releases the queued start of the packet");
++            std::vector<uint8_t> tail(32u, 0x44u);
++            appendImage(tail, 1u, true, 0x55u); // next packet: must wait for its own window
++            mem.submitGifPacket(GifPathId::Path3, tail.data(), static_cast<uint32_t>(tail.size()));
++            t.Equals(emittedBytes, static_cast<size_t>(64u), "the rest of the open packet passes up to its EOP");
++            t.Equals(fqc(), 2u, "the following packet stays queued");
++            mask(false);
++            t.Equals(emittedBytes, static_cast<size_t>(96u), "the following packet takes the next window");
++        });
++
+         tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)
+         {
+             std::vector<uint8_t> order;
