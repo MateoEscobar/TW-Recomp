@@ -1,0 +1,118 @@
+diff --git a/ps2xRecomp/src/lib/cop0_translator.cpp b/ps2xRecomp/src/lib/cop0_translator.cpp
+index 1823a39..f7c50bc 100644
+--- a/ps2xRecomp/src/lib/cop0_translator.cpp
++++ b/ps2xRecomp/src/lib/cop0_translator.cpp
+@@ -44,7 +44,8 @@ namespace ps2recomp
+             case COP0_REG_BADVADDR:
+                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_badvaddr);", rt);
+             case COP0_REG_COUNT:
+-                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
++                // TWR: Count avanza con el reloj EE del planificador (en el hardware corre solo).
++                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)runtime->cop0Count());", rt);
+             case COP0_REG_ENTRYHI:
+                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entryhi);", rt);
+             case COP0_REG_COMPARE:
+@@ -94,7 +95,7 @@ namespace ps2recomp
+             case COP0_REG_BADVADDR:
+                 return "// MTC0 to BADVADDR register ignored (read-only)";
+             case COP0_REG_COUNT:
+-                return fmt::format("ctx->cop0_count = GPR_U32(ctx, {});", rt);
++                return fmt::format("runtime->setCop0Count(GPR_U32(ctx, {}));", rt);
+             case COP0_REG_ENTRYHI:
+                 return fmt::format("ctx->cop0_entryhi = GPR_U32(ctx, {}) & 0xC00000FF;", rt);
+             case COP0_REG_COMPARE:
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index e04a933..07134b2 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -399,6 +399,12 @@ public:
+     void requestStop();
+     bool isStopRequested() const;
+ 
++    // TWR: COP0 Count (registro 9). En el R5900 avanza solo a la frecuencia del EE; el código recompilado lo leía de
++    // ctx->cop0_count, que nada incrementaba, y los relojes del juego basados en Count quedaban congelados (The Warriors:
++    // bucle principal 0x148C90 vía 0x148FC8). Se deriva del reloj EE del planificador; mtc0 fija un desplazamiento.
++    uint32_t cop0Count() const;
++    void setCop0Count(uint32_t value);
++
+     EeScheduler &eeScheduler();
+     const EeScheduler &eeScheduler() const;
+     void postEeEvent(EeEvent event);
+@@ -528,6 +534,7 @@ private:
+     VU1Interpreter m_vu1{VU1Interpreter::Unit::VU1};
+     R5900Context m_cpuContext;
+     std::unique_ptr<EeScheduler> m_eeScheduler;
++    uint32_t m_cop0CountBias = 0; // TWR: Count = ciclo EE + desplazamiento (mtc0)
+     mutable std::mutex m_eeKernelStateMutex;
+     std::unordered_map<int, std::vector<EeExitHandlerRegistration>> m_eeExitHandlers;
+     std::unordered_map<uint32_t, uint32_t> m_eeSyscallOverrides;
+diff --git a/ps2xRuntime/src/lib/ps2_debug_panel.cpp b/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+index c9aa2c6..4c40de4 100644
+--- a/ps2xRuntime/src/lib/ps2_debug_panel.cpp
++++ b/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+@@ -792,7 +792,7 @@ namespace
+                         cpu.cop0_status,
+                         cpu.cop0_cause,
+                         cpu.cop0_epc,
+-                        cpu.cop0_count,
++                        runtime.cop0Count(),
+                         cpu.cop0_compare,
+                         cpu.cop0_badvaddr);
+         }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 14f9803..7530bbb 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2571,6 +2571,17 @@ bool PS2Runtime::isStopRequested() const
+     return m_stopRequested.load(std::memory_order_relaxed);
+ }
+ 
++uint32_t PS2Runtime::cop0Count() const
++{
++    return static_cast<uint32_t>(eeScheduler().eeCycle()) + m_cop0CountBias;
++}
++
++void PS2Runtime::setCop0Count(uint32_t value)
++{
++    m_cop0CountBias = value - static_cast<uint32_t>(eeScheduler().eeCycle());
++    m_cpuContext.cop0_count = value;
++}
++
+ EeScheduler &PS2Runtime::eeScheduler()
+ {
+     return *m_eeScheduler;
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index eccf335..ce50633 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -989,6 +989,30 @@ void register_code_generator_tests()
+             t.IsTrue(mtc0Code.find("Unhandled COP0") == std::string::npos, "MTC0 should not hit unhandled COP0 path");
+         });
+ 
++        tc.Run("COP0 Count reads and writes the runtime EE clock", [](TestCase &t) {
++            // TWR: Count avanza solo en el hardware; leer ctx->cop0_count congelaba los relojes del juego.
++            CodeGenerator gen({}, {});
++
++            Instruction mfc0{};
++            mfc0.opcode = OPCODE_COP0;
++            mfc0.rs = COP0_MF;
++            mfc0.rt = 2;
++            mfc0.rd = COP0_REG_COUNT;
++            std::string readCode = gen.translateInstruction(mfc0);
++            t.IsTrue(readCode.find("runtime->cop0Count()") != std::string::npos,
++                     "MFC0 COUNT should read the runtime clock but got: " + readCode);
++            t.IsTrue(readCode.find("ctx->cop0_count") == std::string::npos, "MFC0 COUNT must not read the frozen field");
++
++            Instruction mtc0{};
++            mtc0.opcode = OPCODE_COP0;
++            mtc0.rs = COP0_MT;
++            mtc0.rt = 3;
++            mtc0.rd = COP0_REG_COUNT;
++            std::string writeCode = gen.translateInstruction(mtc0);
++            t.IsTrue(writeCode.find("runtime->setCop0Count(GPR_U32(ctx, 3))") != std::string::npos,
++                     "MTC0 COUNT should set the runtime clock but got: " + writeCode);
++        });
++
+         tc.Run("FCR access uses CFC1/CTC1", [](TestCase &t) {
+             CodeGenerator gen({}, {});
+ 

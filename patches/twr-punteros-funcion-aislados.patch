@@ -1,0 +1,90 @@
+diff --git a/ps2xRecomp/src/lib/elf_parser.cpp b/ps2xRecomp/src/lib/elf_parser.cpp
+index a4f2444..810de7f 100644
+--- a/ps2xRecomp/src/lib/elf_parser.cpp
++++ b/ps2xRecomp/src/lib/elf_parser.cpp
+@@ -1424,6 +1424,25 @@ namespace
+         return name == ".ctors" || name == ".dtors" || name == ".init_array" || name == ".fini_array";
+     }
+ 
++    // TWR: the instruction right after a `jr ra` and its delay slot that allocates a stack frame (addiu sp,sp,-N).
++    // A data word pointing there is a function pointer even when it stands alone: code after an early return that
++    // a switch table reaches never allocates a new frame. The Warriors keeps isolated method pointers like this in
++    // object tables in .data (0x0024E720 at 0x0050B5E4); without the split the call landed inside another function.
++    bool IsPostReturnStackPrologue(const std::vector<ps2recomp::Section> &sections, uint32_t target)
++    {
++        uint32_t returnRaw = 0;
++        uint32_t entryRaw = 0;
++        if (target < 2u * MIPS_INSTRUCTION_SIZE ||
++            !ReadWordByAddress(sections, target - 2u * MIPS_INSTRUCTION_SIZE, returnRaw) ||
++            !ReadWordByAddress(sections, target, entryRaw))
++        {
++            return false;
++        }
++        constexpr uint32_t kJrRa = 0x03E00008u;
++        const bool allocatesFrame = (entryRaw >> 16) == 0x27BDu && (entryRaw & 0x8000u) != 0u; // addiu sp,sp,-N
++        return returnRaw == kJrRa && allocatesFrame && !IsDelaySlotOfControlTransfer(sections, target);
++    }
++
+     void ScanDataFunctionPointerTables(const std::vector<ps2recomp::Section> &sections, std::unordered_set<uint32_t> &starts)
+     {
+         struct PointerCandidate
+@@ -1560,7 +1579,7 @@ namespace
+                 if (candidates[index].hasConservativeShape)
+                 {
+                     const bool clustered = dedicatedPointerSection || hasConservativeNeighborWithin(index, kClusterDistanceBytes);
+-                    if (clustered)
++                    if (clustered || IsPostReturnStackPrologue(sections, candidates[index].target)) // TWR
+                     {
+                         starts.insert(candidates[index].target);
+                     }
+@@ -1572,6 +1591,10 @@ namespace
+                 {
+                     starts.insert(candidates[index].target);
+                 }
++                else if (IsPostReturnStackPrologue(sections, candidates[index].target))
++                {
++                    starts.insert(candidates[index].target); // TWR
++                }
+             }
+         }
+     }
+diff --git a/ps2xTest/src/ps2_recompiler_tests.cpp b/ps2xTest/src/ps2_recompiler_tests.cpp
+index e2ffe27..502d913 100644
+--- a/ps2xTest/src/ps2_recompiler_tests.cpp
++++ b/ps2xTest/src/ps2_recompiler_tests.cpp
+@@ -536,6 +536,14 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
+     textWords[373] = 0x03E00008u; // jr ra
+     textWords[374] = 0x27BD0010u; // addiu sp,sp,0x10 (delay slot)
+ 
++    // TWR: a method reached only through one isolated data pointer (The Warriors keeps such pointers in
++    // object tables in .data, e.g. 0x0024E720). It starts right after the previous function's return and
++    // allocates a stack frame, which a switch label never does.
++    textWords[375] = 0x27BDFFE0u; // isolated-pointer method at 0x001005DC: addiu sp,sp,-0x20
++    textWords[376] = 0xFFBF0000u; // sd ra,0(sp)
++    textWords[377] = 0x03E00008u; // jr ra
++    textWords[378] = 0x27BD0020u; // addiu sp,sp,0x20 (delay slot)
++
+     text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                    static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+ 
+@@ -568,9 +576,10 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
+     data->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
+     data->set_addr_align(4);
+     data->set_address(0x00201000u);
+-    std::array<uint32_t, 17> singletonCallbacks{};
++    std::array<uint32_t, 33> singletonCallbacks{};
+     singletonCallbacks[0] = 0x00100580u;
+     singletonCallbacks[16] = 0x00100588u;
++    singletonCallbacks[32] = 0x001005DCu; // TWR: isolated pointer to a post-return stack prologue
+     data->set_data(reinterpret_cast<const char *>(singletonCallbacks.data()),
+                    static_cast<ELFIO::Elf_Word>(singletonCallbacks.size() * sizeof(uint32_t)));
+ 
+@@ -1632,6 +1641,8 @@ void register_ps2_recompiler_tests()
+                      "a long callback passed as the fifth register argument should be discovered");
+             t.IsFalse(hasStart(0x00100548u),
+                       "a post-return prologue without a cross-reference must remain only a hint");
++            t.IsTrue(hasStart(0x001005DCu),
++                     "an isolated data pointer to a post-return stack prologue should be discovered");
+             t.IsTrue(hasStart(0x00100580u),
+                      "a singleton data pointer loaded and consumed by JALR should be discovered");
+             t.IsFalse(hasStart(0x00100588u),

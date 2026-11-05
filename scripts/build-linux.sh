@@ -1,105 +1,107 @@
 #!/usr/bin/env bash
-# scripts/build-linux.sh
-# Compila TW-Recomp para Linux (x64 GCC/Clang + Ninja) y opcionalmente empaqueta
-# un tar.gz portable (glibc 2.35, Ubuntu 22.04+).
+# scripts/build-linux.sh — compila The Warriors sobre PS2Recomp + la pila de parches de god-of-war-recomp.
 #
-# Requisitos:
-#   - CMake 3.21+, Ninja, GCC/Clang, pkg-config
-#   - libSDL2-dev, libgl-dev, libavcodec-dev, libavformat-dev, libavutil-dev,
-#     libswresample-dev, libswscale-dev, libasound2-dev, xorg-dev
-#   - patchelf (solo para --package)
+# [TWR-27 decisión 23] Misma estructura que god-of-war-recomp (scripts/compilar.ps1):
+#   1. PS2Recomp upstream en el commit fijado (PS2RECOMP_COMMIT), clonado en ./PS2Recomp (ignorado por git).
+#   2. Parches en el orden de patches/series: primero los de god-of-war-recomp (copiados tal cual, ps2recomp-*),
+#      después los propios de Warriors (twr-*). Cada parche se genera contra el árbol con los anteriores aplicados.
+#   3. Recompilador -> C++ de SLUS_212.15 (games/warriors/warriors.toml) -> ps2xRuntime/src/runner.
+#   4. ps2EntryRunner sin LTO, con register_functions.cpp a -O0 y fuera del unity build: con LTO el enlazado se come
+#      >31 GB de RAM y cuelga la máquina; a -O3 ese archivo tarda >45 min. El build corre con tope de memoria.
+#
+# Requisitos: git, cmake 3.21+, ninja, gcc/clang, python3, libSDL2/OpenGL/EGL, FFmpeg y ALSA de desarrollo.
 #
 # Uso:
-#   scripts/build-linux.sh                                         # solo compilar (Release)
-#   scripts/build-linux.sh --config Debug                          # compilar en Debug
-#   scripts/build-linux.sh --package                               # compilar + empaquetar tar.gz en dist/
-#   scripts/build-linux.sh --package --output ~/rel                # idem, directorio personalizado
-#   scripts/build-linux.sh --package --skip-build --output <dir>   # solo empaquetar (build ya hecho)
+#   scripts/build-linux.sh              # todo
+#   scripts/build-linux.sh --runner     # solo recompila ps2EntryRunner (overrides/runner ya copiados)
+# Variables: PS2RECOMP_URL (clon local para no bajarlo de nuevo), PS2RECOMP_DEPS (_deps ya bajados), JOBS (por defecto 20), MEMMAX (22G).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="Release"
-PACKAGE=0
-SKIP_BUILD=0
-OUTPUT=""
+PS2RECOMP_URL="${PS2RECOMP_URL:-https://github.com/ran-j/PS2Recomp.git}"
+PS2RECOMP_COMMIT="c5a9d02573410a2085a4b4b831b0b68ba3515440"
+REC="$ROOT/PS2Recomp"
+BLD="$ROOT/build/ps2recomp"
+GEN="$ROOT/build/gen"
+JOBS="${JOBS:-20}"
+MEMMAX="${MEMMAX:-22G}"
+ONLY_RUNNER=0
+[[ "${1:-}" == "--runner" ]] && ONLY_RUNNER=1
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --config)      CONFIG="$2"; shift 2 ;;
-        --package)     PACKAGE=1;   shift   ;;
-        --skip-build)  SKIP_BUILD=1; shift  ;;
-        --output)      OUTPUT="$2"; shift 2 ;;
-        *) echo "Opción desconocida: $1" >&2; exit 1 ;;
-    esac
-done
+step() { printf '\n== %s\n' "$*"; }
 
-if [[ $SKIP_BUILD -eq 0 ]]; then
-    echo "== Configurando (CMake + Ninja, $CONFIG)..."
-    cmake -B "$ROOT/build" -G Ninja "-DCMAKE_BUILD_TYPE=$CONFIG" -DPS2X_ENABLE_SCCACHE=OFF
+limited() {
+    # Tope de memoria si systemd de usuario está disponible; si no, solo baja la prioridad.
+    if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope -q true 2>/dev/null; then
+        systemd-run --user --scope -q -p "MemoryMax=$MEMMAX" -p MemorySwapMax=0 nice -n 10 "$@"
+    else
+        nice -n 10 "$@"
+    fi
+}
 
-    echo "== Compilando..."
-    cmake --build "$ROOT/build" --parallel
-fi
+if [[ $ONLY_RUNNER -eq 0 ]]; then
+    step "PS2Recomp $PS2RECOMP_COMMIT"
+    [[ -d "$REC/.git" ]] || git clone -q "$PS2RECOMP_URL" "$REC"
+    git -C "$REC" cat-file -e "$PS2RECOMP_COMMIT^{commit}" 2>/dev/null || git -C "$REC" fetch -q origin "$PS2RECOMP_COMMIT"
+    git -C "$REC" checkout -qf "$PS2RECOMP_COMMIT"
+    git -C "$REC" clean -fdq
+    git -C "$REC" submodule update -q --init --recursive
 
-if [[ $PACKAGE -eq 0 ]]; then
-    echo "== Build completado. Usa --package para generar el tar.gz portable."
-    exit 0
-fi
+    step "Parches (patches/series)"
+    while IFS= read -r patch; do
+        [[ -z "$patch" || "$patch" == \#* ]] && continue
+        git -C "$REC" apply --ignore-whitespace "$ROOT/patches/$patch"
+        echo "  $patch"
+    done < "$ROOT/patches/series"
 
-[[ -z "$OUTPUT" ]] && OUTPUT="$ROOT/dist"
+    # Ajustes de compilación (los mismos que hace god-of-war-recomp en su script, más -O0 en la tabla de funciones).
+    cat >> "$REC/ps2xRuntime/CMakeLists.txt" <<'EOF'
 
-STAGING_ROOT="$OUTPUT/TW-Recomp"
-STAGING_BIN="$STAGING_ROOT/bin"
-STAGING_LIB="$STAGING_ROOT/lib"
-
-echo "== Instalando binarios en $STAGING_BIN..."
-cmake --install "$ROOT/build" --prefix "$STAGING_ROOT"
-
-# Renombrar el ejecutable principal al nombre esperado por el usuario final
-if [[ -f "$STAGING_BIN/ps2EntryRunner" ]]; then
-    mv -f "$STAGING_BIN/ps2EntryRunner" "$STAGING_BIN/TW-Recomp"
-fi
-
-echo "== Empaquetando dependencias .so..."
-mkdir -p "$STAGING_LIB"
-
-# Libs del sistema que se asumen presentes en cualquier glibc 2.35 (Ubuntu 22.04+)
-SYSTEM_LIBS="libm\.so|libc\.so|libpthread\.so|libdl\.so|librt\.so|libstdc\+\+\.so|libgcc_s\.so|ld-linux"
-
-for BINARY in "$STAGING_BIN/TW-Recomp" "$STAGING_BIN/ps2_recomp" "$STAGING_BIN/ps2_analyzer"; do
-    [[ -f "$BINARY" ]] || continue
-    ldd "$BINARY" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read -r LIB_PATH; do
-        LIB_NAME="$(basename "$LIB_PATH")"
-        if echo "$LIB_NAME" | grep -qvE "$SYSTEM_LIBS"; then
-            [[ -f "$STAGING_LIB/$LIB_NAME" ]] || cp -L "$LIB_PATH" "$STAGING_LIB/$LIB_NAME"
-        fi
-    done
-done
-
-# Ajustar RPATH de los ejecutables para encontrar las libs en ./lib relativo al binario
-for BINARY in "$STAGING_BIN/TW-Recomp" "$STAGING_BIN/ps2_recomp" "$STAGING_BIN/ps2_analyzer"; do
-    [[ -f "$BINARY" ]] || continue
-    patchelf --set-rpath '$ORIGIN/../lib' "$BINARY"
-done
-
-# Script de lanzamiento que fuerza LD_LIBRARY_PATH como fallback
-cat > "$STAGING_BIN/run.sh" <<'EOF'
-#!/usr/bin/env bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="$SCRIPT_DIR/../lib:${LD_LIBRARY_PATH:-}"
-exec "$SCRIPT_DIR/TW-Recomp" "$@"
+# TWR: el código generado incluye <ps2_recompiled_functions.h> desde src/runner
+target_include_directories(ps2EntryRunner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/runner)
+# TWR: la tabla de ~590k funciones compila en minutos a -O0 y en >45 min a -O3; no aporta rendimiento.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/runner/register_functions.cpp" PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION TRUE SKIP_PRECOMPILE_HEADERS TRUE COMPILE_OPTIONS "-O0")
 EOF
-chmod +x "$STAGING_BIN/run.sh"
+    sed -i 's/set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)/# IPO desactivado (TWR)/' \
+        "$REC/ps2xRuntime/cmake/ReleaseMode.cmake"
 
-# Archivos de uso inmediato
-cp -f "$ROOT/games/warriors/config.ini.template" "$STAGING_BIN/" 2>/dev/null || true
-cp -f "$ROOT/README.md"                          "$STAGING_BIN/" 2>/dev/null || true
+    step "CMake"
+    # PS2RECOMP_DEPS=<build>/_deps de otro árbol: reutiliza las fuentes ya bajadas (FetchContent sin red).
+    DEPS_ARGS=()
+    if [[ -n "${PS2RECOMP_DEPS:-}" ]]; then
+        for src in "$PS2RECOMP_DEPS"/*-src; do
+            name="$(basename "$src" -src)"
+            DEPS_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_${name^^}=$src")
+        done
+    fi
+    cmake -S "$REC" -B "$BLD" -G Ninja "${DEPS_ARGS[@]}" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+        -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 \
+        -DPS2X_ENABLE_RUNNER_UNITY_BUILD=ON -DPS2X_ENABLE_RUNNER_PCH=ON >/dev/null
 
-VERSION="${GITHUB_REF_NAME:-dev}"
-TARBALL_NAME="TW-Recomp-${VERSION}-linux-x64.tar.gz"
-TARBALL_PATH="$OUTPUT/$TARBALL_NAME"
+    step "Recompilador"
+    limited ninja -C "$BLD" -j "$JOBS" ps2_recomp
 
-echo "== Empaquetando $TARBALL_NAME..."
-tar -czf "$TARBALL_PATH" -C "$OUTPUT" TW-Recomp
-echo "==> $TARBALL_PATH"
+    step "C++ de SLUS_212.15"
+    [[ -f "$ROOT/games/warriors/SLUS_212.15" ]] || { echo "Falta games/warriors/SLUS_212.15 (scripts/extract_iso.py)" >&2; exit 1; }
+    rm -rf "$GEN" && mkdir -p "$GEN"
+    sed -e "s#^input = .*#input = \"$ROOT/games/warriors/SLUS_212.15\"#" \
+        -e "s#^output = .*#output = \"$GEN/\"#" \
+        "$ROOT/games/warriors/warriors.toml" > "$BLD/warriors.toml"
+    "$(find "$BLD" -type f -name ps2_recomp -perm -u+x | head -1)" "$BLD/warriors.toml" | tail -3
+    echo "  $(find "$GEN" -type f | wc -l) archivos"
+
+    step "Runner"
+    RUNNER="$REC/ps2xRuntime/src/runner"
+    find "$RUNNER" -maxdepth 1 -type f -delete
+    cp "$GEN"/* "$RUNNER"/
+fi
+
+# Código propio de Warriors (overrides y cabeceras): también en --runner.
+shopt -s nullglob
+for f in "$ROOT"/src/*.cpp "$ROOT"/src/*.h; do cp "$f" "$REC/ps2xRuntime/src/runner/"; done
+
+step "ps2EntryRunner (-j$JOBS, MemoryMax=$MEMMAX)"
+limited ninja -C "$BLD" -j "$JOBS" ps2EntryRunner
+ls -la "$BLD/ps2xRuntime/ps2EntryRunner"

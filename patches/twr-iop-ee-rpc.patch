@@ -1,0 +1,721 @@
+diff --git a/ps2xIOP/include/ps2x/iop/iop_host.h b/ps2xIOP/include/ps2x/iop/iop_host.h
+index 1eceb08..1c5fd4d 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_host.h
++++ b/ps2xIOP/include/ps2x/iop/iop_host.h
+@@ -118,6 +118,33 @@ namespace ps2x::iop
+                                          uint32_t a3,
+                                          uint32_t *resultAddress) = 0;
+ 
++        // TWR: IOP -> EE RPC (sifcmd sceSifBindRpc / sceSifCallRpc issued by an IRX against a server the EE
++        // registered with sceSifRegisterRpc). hasGuestRpcServer answers the bind. postGuestRpc hands one call to the
++        // EE asynchronously, as on hardware: the EE server thread runs the server function later and the host
++        // answers through IopSubsystem::completeGuestRpc(callId, reply). The IOP caller (sync mode) waits blocked
++        // meanwhile and the other IOP threads keep running. The defaults keep hosts without an EE RPC registry
++        // source-compatible: the IRX sees an unbound client (cd->server == 0).
++        virtual bool hasGuestRpcServer(uint32_t sid) const
++        {
++            (void)sid;
++            return false;
++        }
++        virtual bool postGuestRpc(uint32_t sid,
++                                  uint32_t function,
++                                  const void *send,
++                                  uint32_t sendSize,
++                                  uint32_t receiveSize,
++                                  uint64_t callId)
++        {
++            (void)sid;
++            (void)function;
++            (void)send;
++            (void)sendSize;
++            (void)receiveSize;
++            (void)callId;
++            return false;
++        }
++
+         // Deliver an IOP -> EE SIF command packet. The default keeps hosts
+         // which do not emulate the EE command dispatcher source-compatible.
+         virtual bool sendSifCommand(uint32_t commandId,
+diff --git a/ps2xIOP/include/ps2x/iop/iop_subsystem.h b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+index 1f4b9a1..e876293 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_subsystem.h
++++ b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+@@ -39,6 +39,8 @@ namespace ps2x::iop
+         [[nodiscard]] bool canBindRpc(uint32_t sid) const noexcept;
+         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
+         void onSifTransfer(const SifTransfer &transfer);
++        // TWR: reply to an IOP -> EE call that the host received through IopHost::postGuestRpc.
++        bool completeGuestRpc(uint64_t callId, const void *reply, uint32_t replySize);
+ 
+         // Physical IOP RAM access shared by the emulator, SIF DMA, and HLE services. Addresses are IOP addresses.
+         [[nodiscard]] uint32_t allocateMemory(uint32_t size, uint32_t alignment = 16u);
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.cpp b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+index aa886a3..3cdebe0 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.cpp
++++ b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+@@ -334,6 +334,7 @@ namespace ps2x::iop::detail
+         case IopThreadState::Delay:
+         case IopThreadState::Semaphore:
+         case IopThreadState::EventFlag:
++        case IopThreadState::EeRpc:
+             status = 0x04u;
+             break;
+         case IopThreadState::Suspended:
+@@ -725,6 +726,32 @@ namespace ps2x::iop::detail
+         cpu.yielded = true;
+     }
+ 
++    bool IopKernel::waitCurrentForEeRpc(uint64_t callId, IopCpuState &cpu)
++    {
++        if (m_currentThread == nullptr)
++            return false;
++        ++m_version;
++        m_currentThread->state = IopThreadState::EeRpc;
++        m_currentThread->eeRpcCall = callId;
++        cpu.yielded = true;
++        return true;
++    }
++
++    bool IopKernel::wakeEeRpcWaiter(uint64_t callId, uint32_t result)
++    {
++        for (auto &[id, thread] : m_threads)
++        {
++            if (thread.state != IopThreadState::EeRpc || thread.eeRpcCall != callId)
++                continue;
++            ++m_version;
++            thread.eeRpcCall = 0;
++            thread.cpu.gpr[2] = result;
++            thread.state = IopThreadState::Ready;
++            return true;
++        }
++        return false;
++    }
++
+     void IopKernel::delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu)
+     {
+         ++m_version; // GOW-Port: invalida la caché de beginNextReady
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.h b/ps2xIOP/src/emulator/core/iop_kernel.h
+index 20a758d..83e8d71 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.h
++++ b/ps2xIOP/src/emulator/core/iop_kernel.h
+@@ -22,6 +22,7 @@ namespace ps2x::iop::detail
+         EventFlag,
+         Suspended,
+         Dead,
++        EeRpc, // TWR: sceSifCallRpc to an EE server, waiting for its reply
+     };
+ 
+     struct IopThread
+@@ -42,6 +43,7 @@ namespace ps2x::iop::detail
+         uint32_t waitMode = 0;
+         uint32_t waitResultAddress = 0;
+         int wakeupCount = 0;
++        uint64_t eeRpcCall = 0; // TWR: IopThreadState::EeRpc
+     };
+ 
+     class IopKernel
+@@ -59,6 +61,9 @@ namespace ps2x::iop::detail
+         [[nodiscard]] bool setInternalEventFlag(int id, uint32_t bits);
+ 
+         void sleepCurrent(IopCpuState &cpu);
++        // TWR: blocks the current thread until wakeEeRpcWaiter(callId); false when there is no current thread.
++        [[nodiscard]] bool waitCurrentForEeRpc(uint64_t callId, IopCpuState &cpu);
++        bool wakeEeRpcWaiter(uint64_t callId, uint32_t result);
+         void delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu);
+ 
+         [[nodiscard]] IopThread *beginNextReady(uint64_t currentCycle);
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 3810d65..2ece3fa 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -1164,6 +1164,19 @@ namespace ps2x::iop::detail
+         return m_impl->rpc.hasServer(sid);
+     }
+ 
++    bool IopEmulator::completeGuestRpc(uint64_t callId, const void *reply, uint32_t replySize)
++    {
++        // TWR: the end function runs like the SIF DMA completion callback of hardware (sifcmd's interrupt).
++        IopRpcBridge::DmaCompletionCallback endFunction{};
++        if (!m_impl->rpc.completeEeCall(callId, reply, replySize, endFunction))
++            return false;
++        if (endFunction.function != 0u)
++            m_impl->pendingGuestCallbacks.emplace(m_impl->totalCycles,
++                                                  Impl::ScheduledGuestCallback{endFunction.function, endFunction.gp,
++                                                                               endFunction.argument});
++        return true;
++    }
++
+     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
+     {
+         m_impl->rpc.onSifTransfer(transfer);
+diff --git a/ps2xIOP/src/emulator/iop_emulator.h b/ps2xIOP/src/emulator/iop_emulator.h
+index afdc1f7..ada4b33 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.h
++++ b/ps2xIOP/src/emulator/iop_emulator.h
+@@ -31,6 +31,7 @@ namespace ps2x::iop::detail
+         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
+         [[nodiscard]] bool hasRpcServer(uint32_t sid) const noexcept;
+         void onSifTransfer(const SifTransfer &transfer);
++        bool completeGuestRpc(uint64_t callId, const void *reply, uint32_t replySize); // TWR
+ 
+         [[nodiscard]] uint32_t allocateMemory(uint32_t size, uint32_t alignment = 16u);
+         [[nodiscard]] bool freeMemory(uint32_t address);
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index a2e5636..5e81594 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -26,6 +26,9 @@ namespace ps2x::iop::detail
+     void IopRpcBridge::reset()
+     {
+         m_servers.clear();
++        m_eeClients.clear();
++        m_eeCalls.clear();
++        m_nextEeCall = 1u;
+         m_nextDmaId = 1u;
+         m_sifInitialized = false;
+     }
+@@ -169,10 +172,93 @@ namespace ps2x::iop::detail
+         case 10:
+         case 11:
+         case 14: // InitRpc
+-        case 15:
+-        case 16:
+             setV0(0);
+             return true;
++        case 15: // TWR: sceSifBindRpc(cd, sid, mode) -- IOP client of an EE server
++        {
++            // SifRpcClientData_t: hdr{pkt_addr, rpc_id, sema_id, mode} 0x00, command 0x10, buff 0x14, cbuff 0x18,
++            // end_function 0x1C, end_param 0x20, server 0x24.
++            constexpr uint32_t kClientDataSize = 0x28u;
++            const uint32_t clientData = cpu.gpr[4];
++            const uint32_t sid = cpu.gpr[5];
++            if (clientData == 0u || !m_memory.ownsRamRange(clientData, kClientDataSize))
++            {
++                setV0(0xFFFFFFFFu);
++                return true;
++            }
++            for (uint32_t offset = 0u; offset < kClientDataSize; offset += 4u)
++                m_memory.write32(clientData + offset, 0u);
++            m_memory.write32(clientData + 0x08u, 0xFFFFFFFFu); // sema_id
++            m_memory.write32(clientData + 0x0Cu, cpu.gpr[6]);  // mode
++            // As on hardware, an EE server that is not registered yet leaves cd->server == 0 and the IRX retries
++            // (its bind loop delays its thread, so the EE keeps running and registers it).
++            if (m_host.hasGuestRpcServer(sid))
++            {
++                m_eeClients[clientData] = EeRpcClient{sid, 0u};
++                m_memory.write32(clientData + 0x24u, 0x80000000u | sid); // opaque, non-zero
++            }
++            else
++                m_eeClients.erase(clientData);
++            setV0(0u);
++            return true;
++        }
++        case 16: // TWR: sceSifCallRpc(cd, fno, mode, send, ssize, recv, rsize, endfunc, efarg)
++        {
++            const uint32_t clientData = cpu.gpr[4];
++            const uint32_t function = cpu.gpr[5];
++            const uint32_t mode = cpu.gpr[6];
++            const uint32_t sendAddress = cpu.gpr[7];
++            const uint32_t stackPointer = cpu.gpr[29];
++            const uint32_t sendSize = m_memory.read32(stackPointer + 16u);
++            const uint32_t receiveAddress = m_memory.read32(stackPointer + 20u);
++            const uint32_t receiveSize = m_memory.read32(stackPointer + 24u);
++            const uint32_t endFunction = m_memory.read32(stackPointer + 28u);
++            const uint32_t endParameter = m_memory.read32(stackPointer + 32u);
++
++            const auto client = m_eeClients.find(clientData);
++            constexpr uint32_t kMaxRpcBytes = 64u * 1024u;
++            if (client == m_eeClients.end() || sendSize > kMaxRpcBytes || receiveSize > kMaxRpcBytes ||
++                (sendSize != 0u && !m_memory.ownsRamRange(sendAddress, sendSize)) ||
++                (receiveSize != 0u && !m_memory.ownsRamRange(receiveAddress, receiveSize)))
++            {
++                setV0(0xFFFFFFFFu); // -E_SIF_RPC_CALL
++                return true;
++            }
++            std::vector<uint8_t> send(sendSize, 0u);
++            if (sendSize != 0u && !m_memory.readRam(sendAddress, send.data(), send.size()))
++            {
++                setV0(0xFFFFFFFFu);
++                return true;
++            }
++
++            const uint64_t callId = m_nextEeCall++;
++            const EeRpcCall call{clientData, receiveAddress, receiveSize, endFunction, endParameter, cpu.gpr[28], false};
++            m_memory.write32(clientData + 0x10u, function);    // command
++            m_memory.write32(clientData + 0x1Cu, endFunction);  // end_function
++            m_memory.write32(clientData + 0x20u, endParameter); // end_param
++            m_eeCalls[callId] = call; // before posting: the reply may only arrive later, but never gets lost
++            if (!m_host.postGuestRpc(client->second.sid, function, send.data(), sendSize, receiveSize, callId))
++            {
++                m_eeCalls.erase(callId);
++                setV0(0xFFFFFFFFu);
++                return true;
++            }
++            client->second.pendingCall = callId;
++            setV0(0u);
++            // SIF_RPC_M_NOWAIT (bit 0): return now; sceSifCheckStatRpc reports the call busy until the reply.
++            if ((mode & 1u) == 0u)
++            {
++                const auto posted = m_eeCalls.find(callId);
++                if (posted != m_eeCalls.end())
++                {
++                    posted->second.waiting = m_kernel.waitCurrentForEeRpc(callId, cpu);
++                    if (!posted->second.waiting)
++                        m_host.log(LogLevel::Warning,
++                                   "[iop-ee-rpc] sceSifCallRpc sincrona fuera de un hilo: no puede esperar");
++                }
++            }
++            return true;
++        }
+         case 12: // sceSifSendCmd
+         case 13: // isceSifSendCmd
+         {
+@@ -251,9 +337,15 @@ namespace ps2x::iop::detail
+             setV0(server.serverData);
+             return true;
+         }
+-        case 18:
+-            setV0(0);
++        case 18: // TWR: sceSifCheckStatRpc(cd): 1 while an IOP -> EE call is in flight
++        {
++            const auto client = m_eeClients.find(cpu.gpr[4]);
++            setV0(client != m_eeClients.end() && client->second.pendingCall != 0u &&
++                          m_eeCalls.count(client->second.pendingCall) != 0u
++                      ? 1u
++                      : 0u);
+             return true;
++        }
+         case 19: // SetRpcQueue
+             setV0(cpu.gpr[4]);
+             return true;
+@@ -395,4 +487,23 @@ namespace ps2x::iop::detail
+         const auto server = m_servers.find(sid);
+         return server != m_servers.end() && server->second.function != 0u;
+     }
++
++    bool IopRpcBridge::completeEeCall(uint64_t callId, const void *reply, uint32_t replySize,
++                                      DmaCompletionCallback &endFunction)
++    {
++        const auto it = m_eeCalls.find(callId);
++        if (it == m_eeCalls.end())
++            return false;
++        const EeRpcCall call = it->second;
++        m_eeCalls.erase(it);
++        const uint32_t size = std::min(replySize, call.receiveSize);
++        if (size != 0u && reply != nullptr)
++            (void)m_memory.writeRam(call.receive, reply, size);
++        if (call.waiting)
++            (void)m_kernel.wakeEeRpcWaiter(callId, 0u);
++        endFunction = {};
++        if (call.endFunction != 0u)
++            endFunction = DmaCompletionCallback{call.endFunction, call.endParameter, call.gp};
++        return true;
++    }
+ }
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.h b/ps2xIOP/src/emulator/services/iop_rpc.h
+index 81360dd..cc0caf1 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.h
++++ b/ps2xIOP/src/emulator/services/iop_rpc.h
+@@ -76,6 +76,11 @@ namespace ps2x::iop::detail
+         }
+         [[nodiscard]] size_t serverCount() const noexcept { return m_servers.size(); }
+ 
++        // TWR: reply of an IOP -> EE call posted with IopHost::postGuestRpc. Writes the receive buffer, wakes the
++        // IOP thread waiting in sceSifCallRpc and returns its end function (run like a SIF interrupt callback).
++        [[nodiscard]] bool completeEeCall(uint64_t callId, const void *reply, uint32_t replySize,
++                                          DmaCompletionCallback &endFunction);
++
+     private:
+         struct RpcServer
+         {
+@@ -89,11 +94,30 @@ namespace ps2x::iop::detail
+             uint32_t queue = 0;
+         };
+ 
++        struct EeRpcClient // TWR: IOP client bound to an EE server
++        {
++            uint32_t sid = 0;
++            uint64_t pendingCall = 0;
++        };
++        struct EeRpcCall // TWR: call posted to the EE, waiting for its reply
++        {
++            uint32_t clientData = 0;
++            uint32_t receive = 0;
++            uint32_t receiveSize = 0;
++            uint32_t endFunction = 0;
++            uint32_t endParameter = 0;
++            uint32_t gp = 0;
++            bool waiting = false;
++        };
++
+         IopHost &m_host;
+         IopMemory &m_memory;
+         IopKernel &m_kernel;
+         DmaCompletionCallback m_dmaCallback{};
+         std::unordered_map<uint32_t, RpcServer> m_servers;
++        std::unordered_map<uint32_t, EeRpcClient> m_eeClients;
++        std::unordered_map<uint64_t, EeRpcCall> m_eeCalls;
++        uint64_t m_nextEeCall = 1u;
+         uint32_t m_nextDmaId = 1u;
+         bool m_sifInitialized = false;
+     };
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index cd27e27..bc71e5f 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -265,6 +265,11 @@ namespace ps2x::iop
+         return hle->handleRpc(request);
+     }
+ 
++    bool IopSubsystem::completeGuestRpc(uint64_t callId, const void *reply, uint32_t replySize)
++    {
++        return m_impl->emulator.completeGuestRpc(callId, reply, replySize);
++    }
++
+     void IopSubsystem::onSifTransfer(const SifTransfer &transfer)
+     {
+         for (auto &service : m_impl->coreServices)
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index d5fb2ed..cd5b4ca 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -414,6 +414,7 @@ public:
+     uint32_t cop0Count() const;
+     void setCop0Count(uint32_t value);
+ 
++    bool completeIopGuestRpc(uint64_t callId, const void *reply, uint32_t replySize); // TWR: IOP -> EE RPC
+     EeScheduler &eeScheduler();
+     const EeScheduler &eeScheduler() const;
+     void postEeEvent(EeEvent event);
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/SIF.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/SIF.cpp
+index dc975ed..40932e5 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/SIF.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/SIF.cpp
+@@ -594,7 +594,8 @@ namespace ps2_stubs
+ 
+     void sceSifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        setReturnS32(ctx, 0);
++        // TWR: the server thread stays in the loop serving its queue (it returned at once and the thread ended).
++        ps2_syscalls::SifRpcLoop(rdram, ctx, runtime);
+     }
+ 
+     void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+index 07fcd29..ed54d34 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+@@ -2,6 +2,9 @@
+ #include "RPC.h"
+ #include "../../ps2_iop_transport.h"
+ 
++#include <deque>
++#include <functional>
++
+ namespace ps2_syscalls
+ {
+     namespace
+@@ -708,14 +711,11 @@ namespace ps2_syscalls
+         uint32_t sid = getRegU32(ctx, 5);
+         uint32_t func = getRegU32(ctx, 6);
+         uint32_t buf = getRegU32(ctx, 7);
+-        // stack args: cfunc, cbuf, qd...
+-        uint32_t sp = getRegU32(ctx, 29);
+-        uint32_t cfunc = 0;
+-        uint32_t cbuf = 0;
+-        uint32_t qd = 0;
+-        readStackU32(rdram, sp, 0x10, cfunc);
+-        readStackU32(rdram, sp, 0x14, cbuf);
+-        readStackU32(rdram, sp, 0x18, qd);
++        // TWR: EE ABI (EABI): arguments 5-8 go in $t0-$t3, not on the stack. The Warriors passes its queue in $t2;
++        // read from the stack it came as 0 and the server had no queue for sceSifRpcLoop.
++        const uint32_t cfunc = getRegU32(ctx, 8);
++        const uint32_t cbuf = getRegU32(ctx, 9);
++        const uint32_t qd = getRegU32(ctx, 10);
+ 
+         t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+         if (!sd)
+@@ -1005,4 +1005,154 @@ namespace ps2_syscalls
+         uint32_t queuePtr = getRegU32(ctx, 4);
+         setReturnS32(ctx, static_cast<int32_t>(queuePtr));
+     }
++
++    // ---- TWR: IOP -> EE RPC -------------------------------------------------------------------------------
++    namespace
++    {
++        constexpr uint32_t kRpcQueueWaitType = 0x52504351u; // 'RPCQ': EE server thread idle in sceSifRpcLoop
++
++        struct IopToEeCall
++        {
++            uint32_t sid = 0;
++            uint32_t function = 0;
++            std::vector<uint8_t> send;
++            uint32_t receiveSize = 0;
++            uint64_t callId = 0;
++        };
++
++        // By queue (t_SifRpcDataQueue address). Only the EE executor thread touches it: the IOP runs there too.
++        std::unordered_map<uint32_t, std::deque<IopToEeCall>> g_iop_to_ee_calls;
++
++        bool traceIopToEe()
++        {
++            static const bool enabled = std::getenv("PS2X_TRACE_IOP_EE_RPC") != nullptr;
++            return enabled;
++        }
++
++        [[noreturn]] void rpcLoopStep(PS2Runtime *runtime, uint32_t queue);
++
++        std::function<void(R5900Context &)> rpcLoopResume(PS2Runtime *runtime, uint32_t queue)
++        {
++            return [runtime, queue](R5900Context &) { rpcLoopStep(runtime, queue); };
++        }
++
++        [[noreturn]] void rpcLoopStep(PS2Runtime *runtime, uint32_t queue)
++        {
++            EeScheduler &scheduler = runtime->eeScheduler();
++            auto pending = g_iop_to_ee_calls.find(queue);
++            if (pending == g_iop_to_ee_calls.end() || pending->second.empty())
++            {
++                // Idle like the real sceSifRpcLoop: the thread sleeps until a request reaches its queue.
++                scheduler.waitExternal(EeWaitReason::External, kRpcQueueWaitType, queue, rpcLoopResume(runtime, queue));
++            }
++            IopToEeCall call = std::move(pending->second.front());
++            pending->second.pop_front();
++
++            uint8_t *rdram = runtime->memory().getRDRAM();
++            uint32_t serverPtr = 0u;
++            {
++                std::lock_guard<std::mutex> lock(g_rpc_mutex);
++                const auto server = g_rpc_servers.find(call.sid);
++                if (server != g_rpc_servers.end())
++                    serverPtr = server->second.sd_ptr;
++            }
++            auto *server = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
++            if (!server || server->func == 0u)
++            {
++                std::cerr << "[iop-ee-rpc] sid=0x" << std::hex << call.sid << " sin servidor EE; respuesta vacia" << std::dec
++                          << std::endl;
++                runtime->completeIopGuestRpc(call.callId, nullptr, 0u);
++                rpcLoopStep(runtime, queue);
++            }
++
++            const uint32_t sendSize = static_cast<uint32_t>(call.send.size());
++            if (sendSize != 0u && server->buf != 0u)
++            {
++                if (uint8_t *destination = getMemPtr(rdram, server->buf))
++                    std::memcpy(destination, call.send.data(), sendSize);
++            }
++            server->rpc_number = static_cast<int>(call.function);
++            server->size = static_cast<int>(sendSize);
++            server->rsize = static_cast<int>(call.receiveSize);
++            if (traceIopToEe())
++                std::cerr << "[iop-ee-rpc] sid=0x" << std::hex << call.sid << " fno=" << std::dec << call.function
++                          << " size=" << sendSize << " rsize=" << call.receiveSize << " func=0x" << std::hex
++                          << server->func << std::dec << std::endl;
++
++            // The server function runs on the server thread, below its current frame, as in sceSifExecRequest.
++            const R5900Context *current = scheduler.currentContext();
++            GuestInvocation invocation;
++            invocation.kind = GuestInvocationKind::RpcCallback;
++            invocation.tag = queue;
++            invocation.context = *current;
++            invocation.context.pc = server->func;
++            SET_GPR_U32(&invocation.context, 4, call.function);
++            SET_GPR_U32(&invocation.context, 5, server->buf);
++            SET_GPR_U32(&invocation.context, 6, sendSize);
++            SET_GPR_U32(&invocation.context, 31, 0u);
++            SET_GPR_U32(&invocation.context, 29, (getRegU32(current, 29) - 0x40u) & ~0xFu);
++            const uint64_t callId = call.callId;
++            const uint32_t receiveSize = call.receiveSize;
++            invocation.onComplete = [runtime, queue, callId, receiveSize](const R5900Context &done, R5900Context &)
++            {
++                // The server returns the address of its reply (sceSifExecRequest copies rsize bytes from it).
++                std::vector<uint8_t> reply(receiveSize, 0u);
++                const uint32_t replyPtr = getRegU32(&done, 2);
++                if (receiveSize != 0u && replyPtr != 0u)
++                {
++                    if (const uint8_t *source = getMemPtr(runtime->memory().getRDRAM(), replyPtr))
++                        std::memcpy(reply.data(), source, receiveSize);
++                }
++                runtime->completeIopGuestRpc(callId, reply.data(), receiveSize);
++                // Back to the loop instead of returning from sceSifRpcLoop.
++                if (GuestThread *thread = runtime->eeScheduler().currentThread())
++                    thread->resumeCompletion = rpcLoopResume(runtime, queue);
++            };
++            scheduler.invokeCurrent(std::move(invocation));
++        }
++    }
++
++    bool hasEeRpcServer(uint32_t sid)
++    {
++        std::lock_guard<std::mutex> lock(g_rpc_mutex);
++        return g_rpc_servers.find(sid) != g_rpc_servers.end();
++    }
++
++    bool postIopRpcToEe(PS2Runtime *runtime, uint32_t sid, uint32_t function, const void *send, uint32_t sendSize,
++                        uint32_t receiveSize, uint64_t callId)
++    {
++        if (!runtime)
++            return false;
++        uint32_t serverPtr = 0u;
++        {
++            std::lock_guard<std::mutex> lock(g_rpc_mutex);
++            const auto server = g_rpc_servers.find(sid);
++            if (server == g_rpc_servers.end())
++                return false;
++            serverPtr = server->second.sd_ptr;
++        }
++        const auto *server = reinterpret_cast<const t_SifRpcServerData *>(getMemPtr(runtime->memory().getRDRAM(), serverPtr));
++        if (!server || server->base == 0u)
++        {
++            std::cerr << "[iop-ee-rpc] sid=0x" << std::hex << sid << " registrado sin cola (sceSifSetRpcQueue)" << std::dec
++                      << std::endl;
++            return false;
++        }
++        IopToEeCall call;
++        call.sid = sid;
++        call.function = function;
++        call.send.assign(static_cast<const uint8_t *>(send), static_cast<const uint8_t *>(send) + sendSize);
++        call.receiveSize = receiveSize;
++        call.callId = callId;
++        g_iop_to_ee_calls[server->base].push_back(std::move(call));
++        // Woken at the next scheduler checkpoint (the IOP runs inside one; no reentry into the scheduler here).
++        runtime->postEeEvent(EeEvent{EeEventType::ExternalWake, kRpcQueueWaitType, server->base});
++        return true;
++    }
++
++    void SifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        (void)rdram;
++        rpcLoopStep(runtime, getRegU32(ctx, 4));
++    }
+ }
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
+index 5e9a446..37f49d9 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
+@@ -17,4 +17,12 @@ namespace ps2_syscalls
+     void sceSifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++
++    // TWR: IOP -> EE RPC. An IRX (The Warriors: MultiStream) binds to and calls a server that an EE thread
++    // registered with sceSifRegisterRpc and serves with sceSifRpcLoop. The IOP posts each call to the server's
++    // queue; the EE server thread runs the server function on its own stack and the reply goes back to the IOP.
++    bool hasEeRpcServer(uint32_t sid);
++    bool postIopRpcToEe(PS2Runtime *runtime, uint32_t sid, uint32_t function, const void *send, uint32_t sendSize,
++                        uint32_t receiveSize, uint64_t callId);
++    void SifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.cpp b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+index 8d46e03..4d06f0b 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -6,6 +6,7 @@
+ #include "runtime/ps2_memory.h"
+ #include "Kernel/Stubs/MemoryCard.h"
+ #include "Kernel/Syscalls/Common.h"
++#include "Kernel/Syscalls/RPC.h"
+ 
+ #include <algorithm>
+ #include <cstring>
+@@ -517,6 +518,21 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
+                                          packetSize);
+ }
+ 
++bool PS2IopHostAdapter::hasGuestRpcServer(uint32_t sid) const
++{
++    return ps2_syscalls::hasEeRpcServer(sid);
++}
++
++bool PS2IopHostAdapter::postGuestRpc(uint32_t sid,
++                                     uint32_t function,
++                                     const void *send,
++                                     uint32_t sendSize,
++                                     uint32_t receiveSize,
++                                     uint64_t callId)
++{
++    return ps2_syscalls::postIopRpcToEe(&m_runtime, sid, function, send, sendSize, receiveSize, callId);
++}
++
+ void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)
+ {
+     const char *prefix = "[ps2xIOP]";
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.h b/ps2xRuntime/src/lib/ps2_iop_host.h
+index 89d8576..4f2d1ee 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.h
++++ b/ps2xRuntime/src/lib/ps2_iop_host.h
+@@ -83,6 +83,13 @@ public:
+                              uint32_t a3,
+                              uint32_t *resultAddress) override;
+     bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override;
++    bool hasGuestRpcServer(uint32_t sid) const override; // TWR: IOP -> EE RPC
++    bool postGuestRpc(uint32_t sid,
++                      uint32_t function,
++                      const void *send,
++                      uint32_t sendSize,
++                      uint32_t receiveSize,
++                      uint64_t callId) override;
+ 
+     void log(ps2x::iop::LogLevel level, std::string_view message) override;
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 18f4e55..061682a 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -600,6 +600,12 @@ ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &re
+     return m_iopSubsystem->selectRpcAbi(request);
+ }
+ 
++bool PS2Runtime::completeIopGuestRpc(uint64_t callId, const void *reply, uint32_t replySize)
++{
++    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
++    return m_iopSubsystem->completeGuestRpc(callId, reply, replySize);
++}
++
+ bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
+ {
+     return m_iopSubsystem->canBindRpc(sid);
+diff --git a/ps2xTest/src/ps2_sif_rpc_tests.cpp b/ps2xTest/src/ps2_sif_rpc_tests.cpp
+index 1a9eac0..82d1864 100644
+--- a/ps2xTest/src/ps2_sif_rpc_tests.cpp
++++ b/ps2xTest/src/ps2_sif_rpc_tests.cpp
+@@ -278,9 +278,9 @@ void register_ps2_sif_rpc_tests()
+             t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifSetRpcQueue should succeed");
+ 
+             setRegU32(env.ctx, 29, K_STACK_ADDR);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, 0x9000u);          // cfunc
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kClientCbufAddr);  // cbuf
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x18u, kQdAddr);          // qd
++            setRegU32(env.ctx, 8, 0x9000u); // TWR: EABI $t0, cfunc
++            setRegU32(env.ctx, 9, kClientCbufAddr); // TWR: EABI $t1, cbuf
++            setRegU32(env.ctx, 10, kQdAddr); // TWR: EABI $t2, qd
+ 
+             setRegU32(env.ctx, 4, kSdAddr);
+             setRegU32(env.ctx, 5, kSid);
+@@ -497,9 +497,9 @@ void register_ps2_sif_rpc_tests()
+             t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifSetRpcQueue should succeed");
+ 
+             setRegU32(env.ctx, 29, K_STACK_ADDR);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, 0u);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kServerCbufAddr);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x18u, kQdAddr);
++            setRegU32(env.ctx, 8, 0u); // TWR: EABI $t0
++            setRegU32(env.ctx, 9, kServerCbufAddr); // TWR: EABI $t1
++            setRegU32(env.ctx, 10, kQdAddr); // TWR: EABI $t2
+ 
+             setRegU32(env.ctx, 4, kSdAddr);
+             setRegU32(env.ctx, 5, kSid);
+@@ -570,9 +570,9 @@ void register_ps2_sif_rpc_tests()
+             t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifSetRpcQueue should succeed");
+ 
+             setRegU32(env.ctx, 29, K_STACK_ADDR);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, 0u);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, 0u);
+-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x18u, kQdAddr);
++            setRegU32(env.ctx, 8, 0u); // TWR: EABI $t0
++            setRegU32(env.ctx, 9, 0u); // TWR: EABI $t1
++            setRegU32(env.ctx, 10, kQdAddr); // TWR: EABI $t2
+ 
+             setRegU32(env.ctx, 4, kSdAddr);
+             setRegU32(env.ctx, 5, kSid);

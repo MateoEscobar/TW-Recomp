@@ -1,0 +1,197 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 07134b2..d5fb2ed 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -379,6 +379,7 @@ public:
+     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
+     void clearLLBit(R5900Context *ctx);
+     void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
++    void setGameHeap(uint32_t guestBase, uint32_t guestEnd); // TWR: SetupHeap
+     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
+@@ -390,6 +391,14 @@ public:
+     // GOW-Port: las pilas de interrupciones/callbacks se reservan desde lo alto de la RAM hacia abajo; este
+     // limite las mantiene por debajo de la pila del hilo principal (que SetupThread coloca tambien arriba).
+     void limitAsyncCallbackStackTop(uint32_t top);
++    // TWR: rango fijo para las pilas de interrupciones/callbacks. Por defecto van en lo alto de la RAM
++    // (0x01F00000+), que un juego que toma toda la RAM con SetupHeap(-1) usa como heap (The Warriors).
++    void setAsyncCallbackStackRange(uint32_t floor, uint32_t top);
++    // TWR: fin del heap del juego tal como lo deja SetupHeap (EndOfHeap lo devuelve). Es independiente del heap
++    // interno del runtime, que puede vivir en otro rango (setPrivateGuestHeap).
++    uint32_t gameHeapEnd() const;
++    void setMainThreadStackBottom(uint32_t bottom);
++    uint32_t mainThreadStackBottom() const;
+     // GOW-Port: rango fijo para el heap interno del runtime (guestMalloc), separado del que el juego
+     // configura con SetupHeap. Sin llamarlo, el runtime usa el heap de SetupHeap como en PS2Recomp.
+     void setPrivateGuestHeap(uint32_t base, uint32_t limit);
+@@ -551,6 +560,8 @@ private:
+     uint32_t m_privateGuestHeapLimit = 0u;
+     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
+     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
++    uint32_t m_gameHeapEnd = 0u;          // TWR: SetupHeap
++    uint32_t m_mainThreadStackBottom = 0u; // TWR: SetupThread
+ 
+     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
+     std::atomic<bool> m_missingFunctionReported{false};
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 7530bbb..18f4e55 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2310,6 +2310,49 @@ uint32_t PS2Runtime::guestHeapLimit() const
+     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
+ }
+ 
++void PS2Runtime::setAsyncCallbackStackRange(uint32_t floor, uint32_t top)
++{
++    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
++    m_asyncCallbackStackFloor = floor & ~(kGuestHeapDefaultAlignment - 1u);
++    m_asyncCallbackStackTop = std::min(top, PS2_RAM_SIZE) & ~(kGuestHeapDefaultAlignment - 1u);
++    std::cerr << "[stack] pilas de interrupciones en 0x" << std::hex << m_asyncCallbackStackFloor << "-0x"
++              << m_asyncCallbackStackTop << std::dec << std::endl;
++}
++
++void PS2Runtime::setGameHeap(uint32_t guestBase, uint32_t guestEnd)
++{
++    {
++        std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++        m_gameHeapEnd = guestEnd;
++    }
++    configureGuestHeap(guestBase, guestEnd);
++    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
++    if (guestEnd > m_asyncCallbackStackFloor && guestBase < m_asyncCallbackStackTop)
++    {
++        std::cerr << "[heap] AVISO: el heap del juego (0x" << std::hex << guestBase << "-0x" << guestEnd
++                  << ") cubre las pilas de interrupciones (0x" << m_asyncCallbackStackFloor << "-0x"
++                  << m_asyncCallbackStackTop << "); muevalas con setAsyncCallbackStackRange" << std::dec << std::endl;
++    }
++}
++
++uint32_t PS2Runtime::gameHeapEnd() const
++{
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    return m_gameHeapEnd;
++}
++
++void PS2Runtime::setMainThreadStackBottom(uint32_t bottom)
++{
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    m_mainThreadStackBottom = bottom;
++}
++
++uint32_t PS2Runtime::mainThreadStackBottom() const
++{
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    return m_mainThreadStackBottom;
++}
++
+ void PS2Runtime::setPrivateGuestHeap(uint32_t base, uint32_t limit)
+ {
+     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index 4bfe0d0..3b542fa 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -948,6 +948,36 @@ void register_ps2_runtime_kernel_tests()
+                      "a later SetupHeap should not move the private runtime heap");
+         });
+ 
++        tc.Run("SetupHeap(-1) reaches the main thread stack like the real kernel", [](TestCase &t)
++        {
++            // TWR: The Warriors toma toda la RAM con SetupHeap(fin del .bss, -1) y recorre su arena hasta EndOfHeap.
++            // Recortarla a 0x01F00000 dejaba su malloc sin memoria; el heap interno del runtime y las pilas de
++            // interrupciones se mueven fuera (overrides del juego).
++            TestEnv env;
++            constexpr uint32_t kMainStackSize = 0x00010000u;
++            env.runtime.setPrivateGuestHeap(0x000A0000u, 0x000FF000u);
++            env.runtime.setAsyncCallbackStackRange(0x00080000u, 0x000A0000u);
++
++            setRegU32(env.ctx, 29, PS2_RAM_SIZE - 0x10u);
++            setRegU32(env.ctx, 4, 0x0036A7F0u);
++            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
++            setRegU32(env.ctx, 6, kMainStackSize);
++            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread should dispatch");
++            const uint32_t stackBottom = ::getRegU32(&env.ctx, 2);
++
++            setRegU32(env.ctx, 4, 0x00715B60u);
++            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
++            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap should dispatch");
++            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap should dispatch");
++            t.Equals(::getRegU32(&env.ctx, 2), stackBottom, "EndOfHeap should end where the main stack starts");
++            t.IsTrue(stackBottom > 0x01F00000u, "the game heap must not be clipped at 0x01F00000");
++
++            const uint32_t a = env.runtime.guestMalloc(0x100u, 16u);
++            t.IsTrue(a >= 0x000A0000u && a + 0x100u <= 0x000FF000u, "runtime allocations stay in the private heap");
++            const uint32_t sp = env.runtime.reserveAsyncCallbackStack(0x1000u, 16u);
++            t.IsTrue(sp > 0x00080000u && sp <= 0x000A0000u, "interrupt stacks stay in their fixed range");
++        });
++
+         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
+         {
+             TestEnv env;
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index 4a4aafd..2d52016 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -531,6 +531,11 @@ namespace ps2_syscalls
+         }
+ 
+         scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
++        if (runtime && stack == 0xFFFFFFFFu)
++        {
++            // TWR: como el kernel real, SetupHeap(-1) termina donde empieza esta pila.
++            runtime->setMainThreadStackBottom(sp);
++        }
+ 
+         // GOW-Port: reservar la pila del hilo principal para que las pilas de interrupciones (que se toman
+         // desde lo alto de la RAM) no la pisen. Sin esto, cada interrupcion machacaba los marcos mas
+@@ -556,23 +561,31 @@ namespace ps2_syscalls
+         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
+ 
+         // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
++        // TWR: en el kernel real "el resto de la RAM" acaba en la pila del hilo principal (SetupThread con stack -1).
++        // The Warriors toma ese tramo entero; recortarlo a 0x01F00000 dejaba su malloc sin memoria (puntero NULL).
+         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+         uint32_t heapLimit = kDefaultGuestHeapEnd;
++        if (runtime && runtime->mainThreadStackBottom() > heapBase)
++        {
++            heapLimit = runtime->mainThreadStackBottom();
++        }
++        const uint32_t restOfRam = heapLimit;
+ 
+         if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
+         {
+             const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
+-            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
++            // TWR: con tamaño explícito el kernel real usa base + tamaño sin recortar (The Warriors pide 0x01FF0004).
++            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, PS2_RAM_SIZE));
+         }
+ 
+         if (heapLimit <= heapBase)
+         {
+-            heapLimit = kDefaultGuestHeapEnd;
++            heapLimit = restOfRam;
+         }
+ 
+         if (runtime)
+         {
+-            runtime->configureGuestHeap(heapBase, heapLimit);
++            runtime->setGameHeap(heapBase, heapLimit);
+ 
+             PS2_IF_AGRESSIVE_LOGS({
+                 std::cerr << "[SetupHeap]"
+@@ -598,9 +611,11 @@ namespace ps2_syscalls
+ 
+         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+ 
+-        const uint32_t ret = runtime
+-                                 ? runtime->guestHeapLimit()
+-                                 : kDefaultGuestHeapEnd;
++        // TWR: el fin del heap del juego, no el del heap interno del runtime (que puede estar en otro rango).
++        const uint32_t gameEnd = runtime ? runtime->gameHeapEnd() : 0u;
++        const uint32_t ret = gameEnd != 0u ? gameEnd
++                             : runtime   ? runtime->guestHeapLimit()
++                                         : kDefaultGuestHeapEnd;
+ 
+         setReturnU32(ctx, ret);
+     }

@@ -61,3 +61,8 @@ __pycache__/
 # Texture packs (user-provided, not committed)
 textures/packs/
 .scannerwork/
+
+# [TWR-27 decisión 23] PS2Recomp fijado + parches (scripts/build-linux.sh)
+/PS2Recomp/
+games/warriors/.disc_layout
+games/warriors/.disc_meta

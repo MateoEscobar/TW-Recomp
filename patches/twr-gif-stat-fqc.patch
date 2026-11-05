@@ -1,0 +1,52 @@
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index cb2f58d..ad1d661 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2352,6 +2352,14 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+                (m_path3Masked ? 0x2u : 0u) |
+                (mode & 0x4u) |
+                (ctrl & 0x8u);
++        // TWR: FQC (bits 24-28) = PATH3 data parked in the GIF FIFO while MSKPATH3 masks it (16 qwords at most).
++        // The Warriors (RenderWare, 0x48B9A8) kicks GIF DMA with PATH3 masked and spins until the FIFO fills
++        // before it starts VIF1; FQC stuck at 0 hung the main thread there.
++        uint64_t parkedBytes = 0u;
++        for (const auto &packet : m_path3MaskedFifo)
++            parkedBytes += packet.size();
++        const uint32_t fqc = static_cast<uint32_t>(std::min<uint64_t>(16u, parkedBytes / 16u));
++        stat = (stat & ~0x1F000000u) | (fqc << 24u);
+         return stat;
+     }
+ 
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 5a31274..dce648d 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -1122,6 +1122,28 @@ void register_ps2_memory_tests()
+             t.IsFalse(mem.isPath3Masked(), "MSKPATH3 with imm bit15 clear should disable PATH3 mask");
+         });
+ 
++        tc.Run("GIF_STAT.FQC counts PATH3 data parked while MSKPATH3 masks it", [](TestCase &t)
++        {
++            // TWR: The Warriors kicks GIF DMA with PATH3 masked and spins until FQC is non-zero.
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
++            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
++            t.Equals((mem.readIORegister(0x10003020u) >> 24) & 0x1Fu, 0u, "an empty FIFO reports FQC 0");
++
++            std::array<uint8_t, 3u * 16u> packet{};
++            mem.submitGifPacket(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()));
++            t.Equals((mem.readIORegister(0x10003020u) >> 24) & 0x1Fu, 3u, "three parked qwords give FQC 3");
++
++            std::array<uint8_t, 40u * 16u> big{};
++            mem.submitGifPacket(GifPathId::Path3, big.data(), static_cast<uint32_t>(big.size()));
++            t.Equals((mem.readIORegister(0x10003020u) >> 24) & 0x1Fu, 16u, "FQC saturates at the 16-qword FIFO");
++
++            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0x0000u);
++            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&clearMask), sizeof(clearMask));
++            t.Equals((mem.readIORegister(0x10003020u) >> 24) & 0x1Fu, 0u, "unmasking drains the FIFO");
++        });
++
+         tc.Run("VIF1 FIFO MSKPATH3 is visible through GIF_STAT", [](TestCase &t)
+         {
+             PS2Memory mem;
