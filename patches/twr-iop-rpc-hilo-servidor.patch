@@ -1,5 +1,5 @@
 diff --git a/ps2xIOP/include/ps2x/iop/iop_host.h b/ps2xIOP/include/ps2x/iop/iop_host.h
-index 1c5fd4df..ef7060c2 100644
+index 1c5fd4d..ef7060c 100644
 --- a/ps2xIOP/include/ps2x/iop/iop_host.h
 +++ b/ps2xIOP/include/ps2x/iop/iop_host.h
 @@ -145,6 +145,12 @@ namespace ps2x::iop
@@ -16,7 +16,7 @@ index 1c5fd4df..ef7060c2 100644
          // which do not emulate the EE command dispatcher source-compatible.
          virtual bool sendSifCommand(uint32_t commandId,
 diff --git a/ps2xIOP/include/ps2x/iop/iop_types.h b/ps2xIOP/include/ps2x/iop/iop_types.h
-index 34914409..9e9976f5 100644
+index 3491440..9e9976f 100644
 --- a/ps2xIOP/include/ps2x/iop/iop_types.h
 +++ b/ps2xIOP/include/ps2x/iop/iop_types.h
 @@ -104,6 +104,11 @@ namespace ps2x::iop
@@ -32,7 +32,7 @@ index 34914409..9e9976f5 100644
  
      enum class SifTransferKind : uint32_t
 diff --git a/ps2xIOP/src/emulator/core/iop_kernel.cpp b/ps2xIOP/src/emulator/core/iop_kernel.cpp
-index 3cdebe07..fdf5e425 100644
+index 3cdebe0..fdf5e42 100644
 --- a/ps2xIOP/src/emulator/core/iop_kernel.cpp
 +++ b/ps2xIOP/src/emulator/core/iop_kernel.cpp
 @@ -4,6 +4,7 @@
@@ -162,7 +162,7 @@ index 3cdebe07..fdf5e425 100644
          else if (thread.state == IopThreadState::Running)
              thread.state = IopThreadState::Ready;
 diff --git a/ps2xIOP/src/emulator/core/iop_kernel.h b/ps2xIOP/src/emulator/core/iop_kernel.h
-index 83e8d71e..130177e0 100644
+index 83e8d71..130177e 100644
 --- a/ps2xIOP/src/emulator/core/iop_kernel.h
 +++ b/ps2xIOP/src/emulator/core/iop_kernel.h
 @@ -6,6 +6,7 @@
@@ -215,7 +215,7 @@ index 83e8d71e..130177e0 100644
  
          [[nodiscard]] IopThread *beginNextReady(uint64_t currentCycle);
 diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
-index 2ece3faf..9721389d 100644
+index 2ece3fa..9721389 100644
 --- a/ps2xIOP/src/emulator/iop_emulator.cpp
 +++ b/ps2xIOP/src/emulator/iop_emulator.cpp
 @@ -445,7 +445,7 @@ namespace ps2x::iop::detail
@@ -358,7 +358,7 @@ index 2ece3faf..9721389d 100644
  
      bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
 diff --git a/ps2xIOP/src/emulator/iop_emulator_const.h b/ps2xIOP/src/emulator/iop_emulator_const.h
-index 53e672ed..8fe7855a 100644
+index 53e672e..8fe7855 100644
 --- a/ps2xIOP/src/emulator/iop_emulator_const.h
 +++ b/ps2xIOP/src/emulator/iop_emulator_const.h
 @@ -3,6 +3,7 @@
@@ -370,7 +370,7 @@ index 53e672ed..8fe7855a 100644
  // NTSC field cadence (approximately 59.94 Hz).  VBlank imports are
  // scheduler waits, not no-op timing hints: returning immediately lets
 diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
-index 5e815942..9fcc158c 100644
+index 5e81594..9fcc158 100644
 --- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
 +++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
 @@ -8,6 +8,7 @@
@@ -554,7 +554,7 @@ index 5e815942..9fcc158c 100644
  
      void IopRpcBridge::onSifTransfer(const SifTransfer &transfer)
 diff --git a/ps2xIOP/src/emulator/services/iop_rpc.h b/ps2xIOP/src/emulator/services/iop_rpc.h
-index cc0caf1f..1747725a 100644
+index cc0caf1..1747725 100644
 --- a/ps2xIOP/src/emulator/services/iop_rpc.h
 +++ b/ps2xIOP/src/emulator/services/iop_rpc.h
 @@ -4,6 +4,8 @@
@@ -617,8 +617,222 @@ index cc0caf1f..1747725a 100644
          uint32_t m_nextDmaId = 1u;
          bool m_sifInitialized = false;
      };
+diff --git a/ps2xIOP/src/native/iop_native_overrides.cpp b/ps2xIOP/src/native/iop_native_overrides.cpp
+index 8200795..8ccde45 100644
+--- a/ps2xIOP/src/native/iop_native_overrides.cpp
++++ b/ps2xIOP/src/native/iop_native_overrides.cpp
+@@ -14,8 +14,9 @@
+ #include <cstdlib>
+ #include <vector>
+ 
+-// Audio device position (ps2xRuntime ps2_runtime.cpp), printed at the stream start for the movie A/V check.
+-extern std::atomic<uint64_t> g_gowAudioFramesProduced;
++// Audio device position, printed at the stream start for the movie A/V check. TWR: defined here (the runtime links the
++// IOP library and updates it from ps2_runtime.cpp) so that the IOP library and its tests link on their own.
++std::atomic<uint64_t> g_gowAudioFramesProduced{0};
+ 
+ namespace ps2x::iop::detail
+ {
+@@ -327,21 +328,21 @@ namespace ps2x::iop::detail
+             {"sio2d_irx", 0x0978u, "sio2d probe_pad", &sio2dProbePad},
+             {"sio2d_irx", 0x0a1cu, "sio2d probe_card", &sio2dProbeCard},
+             {"libsd_irx", 0x1560u, "libsd bus setup", &sdBusSetup},
+-            {"libsd_irx", 0x456cu, "sceSdInit", &sdInit},
+-            {"libsd_irx", 0x3670u, "sceSdSetParam", &sdSetParam},
+-            {"libsd_irx", 0x36ccu, "sceSdGetParam", &sdGetParam},
+-            {"libsd_irx", 0x372cu, "sceSdSetSwitch", &sdSetSwitch},
+-            {"libsd_irx", 0x3764u, "sceSdGetSwitch", &sdGetSwitch},
+-            {"libsd_irx", 0x379cu, "sceSdSetAddr", &sdSetAddr},
+-            {"libsd_irx", 0x3800u, "sceSdGetAddr", &sdGetAddr},
+-            {"libsd_irx", 0x3cbcu, "sceSdSetCoreAttr", &sdSetCoreAttr},
+-            {"libsd_irx", 0x18a0u, "sceSdVoiceTrans", &sdVoiceTrans},
+-            {"libsd_irx", 0x1c30u, "sceSdBlockTrans", &sdBlockTrans},
+-            {"libsd_irx", 0x1af0u, "sceSdVoiceTransStatus", &sdVoiceTransStatus},
+-            {"libsd_irx", 0x1e4cu, "sceSdBlockTransStatus", &sdBlockTransStatus},
+-            {"libsd_irx", 0x0c3cu, "sceSdSetEffectAttr", &sdSetEffectAttr},
+-            {"libsd_irx", 0x3e3cu, "sceSdSetTransIntrHandler", &sdSetTransIntrHandler},
+-            {"libsd_irx", 0x0984u, "sceSdSetEffectWorkArea", &sdSetEffectWorkArea},
++            {"libsd_irx", 0x456cu, "sceSdInit", &sdInit, "libsd", 4},
++            {"libsd_irx", 0x3670u, "sceSdSetParam", &sdSetParam, "libsd", 5},
++            {"libsd_irx", 0x36ccu, "sceSdGetParam", &sdGetParam, "libsd", 6},
++            {"libsd_irx", 0x372cu, "sceSdSetSwitch", &sdSetSwitch, "libsd", 7},
++            {"libsd_irx", 0x3764u, "sceSdGetSwitch", &sdGetSwitch, "libsd", 8},
++            {"libsd_irx", 0x379cu, "sceSdSetAddr", &sdSetAddr, "libsd", 9},
++            {"libsd_irx", 0x3800u, "sceSdGetAddr", &sdGetAddr, "libsd", 10},
++            {"libsd_irx", 0x3cbcu, "sceSdSetCoreAttr", &sdSetCoreAttr, "libsd", 11},
++            {"libsd_irx", 0x18a0u, "sceSdVoiceTrans", &sdVoiceTrans, "libsd", 17},
++            {"libsd_irx", 0x1c30u, "sceSdBlockTrans", &sdBlockTrans, "libsd", 18},
++            {"libsd_irx", 0x1af0u, "sceSdVoiceTransStatus", &sdVoiceTransStatus, "libsd", 19},
++            {"libsd_irx", 0x1e4cu, "sceSdBlockTransStatus", &sdBlockTransStatus, "libsd", 20},
++            {"libsd_irx", 0x0c3cu, "sceSdSetEffectAttr", &sdSetEffectAttr, "libsd", 23},
++            {"libsd_irx", 0x3e3cu, "sceSdSetTransIntrHandler", &sdSetTransIntrHandler, "libsd", 26},
++            {"libsd_irx", 0x0984u, "sceSdSetEffectWorkArea", &sdSetEffectWorkArea, "libsd", 31},
+         };
+     }
+ 
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 44c2494..660102a 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -73,6 +73,28 @@ namespace
+         bool invokeGuestFunction(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *) override { return false; }
+         void log(LogLevel, std::string_view message) override { logs.emplace_back(message); }
+ 
++        // TWR: fake EE side of IOP -> EE RPC and of asynchronous EE -> IOP calls.
++        struct PostedGuestRpc
++        {
++            uint32_t sid;
++            uint32_t function;
++            std::vector<uint8_t> send;
++            uint32_t receiveSize;
++            uint64_t callId;
++        };
++        bool hasGuestRpcServer(uint32_t sid) const override { return sid == eeServerSid && sid != 0u; }
++        bool postGuestRpc(uint32_t sid, uint32_t function, const void *send, uint32_t sendSize, uint32_t receiveSize,
++                          uint64_t callId) override
++        {
++            const auto *bytes = static_cast<const uint8_t *>(send);
++            postedGuestRpcs.push_back({sid, function, std::vector<uint8_t>(bytes, bytes + sendSize), receiveSize, callId});
++            return true;
++        }
++        void completeIopRpc(uint64_t pendingId) override { completedIopRpcs.push_back(pendingId); }
++
++        uint32_t eeServerSid = 0u;
++        std::vector<PostedGuestRpc> postedGuestRpcs;
++        std::vector<uint64_t> completedIopRpcs;
+         std::vector<uint8_t> guest;
+         std::vector<std::string> logs;
+         std::string cdRoot;
+@@ -238,6 +260,10 @@ namespace
+             0x0000646Du, // "md"
+             0x03E00008u, // jr ra
+             0x24000011u, // addiu zero, zero, 17 (sceSifRegisterRpc)
++            0x03E00008u, // jr ra                 (stub at loadAddress + 0x7C)
++            0x2400000Fu, // addiu zero, zero, 15 (sceSifBindRpc)
++            0x03E00008u, // jr ra                 (stub at loadAddress + 0x84)
++            0x24000010u, // addiu zero, zero, 16 (sceSifCallRpc)
+             0x00000000u,
+             0x00000000u,
+         };
+@@ -978,6 +1004,116 @@ int main()
+     if (!expect(relocatedGpData == 0x47505250u,
+                 "Physical RPC callback did not inherit the registering module's GP")) return 1;
+ 
++    // TWR: an EE -> IOP server that blocks on something only the EE can provide (here a synchronous IOP -> EE
++    // sceSifCallRpc) runs in its own IOP thread: the EE call goes pending instead of timing out, and finishes (reply
++    // copied, IopHost::completeIopRpc) once the EE answers. A second call that arrives meanwhile waits its turn.
++    {
++        iop.reset();
++        constexpr uint32_t iopSid = 0x00012345u;
++        constexpr uint32_t eeSid = 0x12344321u;
++        host.eeServerSid = eeSid;
++        host.postedGuestRpcs.clear();
++        host.completedIopRpcs.clear();
++        writeRpcServerIrx(host, 0x100u, iopSid);
++        const ModuleLoadResult blockingModule = iop.loadModuleBuffer(0x100u);
++        if (!expect(blockingModule.handled && blockingModule.startResult == 0,
++                    "Blocking RPC server IRX did not start")) return 1;
++        // Server function: sceSifBindRpc(0x10480, eeSid, 0); sceSifCallRpc(0x10480, 7, 0, buffer 0x10400, 4,
++        // 0x104C0, 4, 0, 0); return 0x104C0 (the EE reply becomes the IOP reply).
++        const uint32_t blockingHandler[] = {
++            0x27BDFFD0u, // addiu sp, sp, -0x30
++            0xAFBF002Cu, // sw    ra, 0x2c(sp)
++            0x3C040001u, // lui   a0, 1
++            0x34840480u, // ori   a0, a0, 0x480 (client data)
++            0x3C050000u | (eeSid >> 16u),
++            0x34A50000u | (eeSid & 0xFFFFu),
++            0x0C000000u | (0x0001007Cu >> 2u), // jal sceSifBindRpc
++            0x00003021u, // addu  a2, zero, zero (delay slot)
++            0x3C040001u, // lui   a0, 1
++            0x34840480u, // ori   a0, a0, 0x480
++            0x24050007u, // addiu a1, zero, 7
++            0x00003021u, // addu  a2, zero, zero (blocking mode)
++            0x3C070001u, // lui   a3, 1
++            0x34E70400u, // ori   a3, a3, 0x400 (send = server buffer)
++            0x24080004u, // addiu t0, zero, 4
++            0xAFA80010u, // sw    t0, 0x10(sp) (ssize)
++            0x3C090001u, // lui   t1, 1
++            0x352904C0u, // ori   t1, t1, 0x4c0
++            0xAFA90014u, // sw    t1, 0x14(sp) (recv)
++            0xAFA80018u, // sw    t0, 0x18(sp) (rsize)
++            0xAFA0001Cu, // sw    zero, 0x1c(sp) (end function)
++            0x0C000000u | (0x00010084u >> 2u), // jal sceSifCallRpc
++            0xAFA00020u, // sw    zero, 0x20(sp) (delay slot: end parameter)
++            0x8FBF002Cu, // lw    ra, 0x2c(sp)
++            0x3C020001u, // lui   v0, 1
++            0x344204C0u, // ori   v0, v0, 0x4c0
++            0x03E00008u, // jr    ra
++            0x27BD0030u, // addiu sp, sp, 0x30 (delay slot)
++        };
++        if (!expect(iop.writeMemory(0x00010300u, blockingHandler, sizeof(blockingHandler)),
++                    "Could not install the blocking RPC handler")) return 1;
++
++        constexpr uint32_t firstPayload = 0x11112222u;
++        constexpr uint32_t secondPayload = 0x33334444u;
++        std::memcpy(host.guest.data() + 0x800u, &firstPayload, sizeof(firstPayload));
++        std::memcpy(host.guest.data() + 0x810u, &secondPayload, sizeof(secondPayload));
++        std::memset(host.guest.data() + 0x900u, 0, 0x20u);
++        RpcRequest first{};
++        first.sid = iopSid;
++        first.send = {0x800u, sizeof(firstPayload)};
++        first.receive = {0x900u, sizeof(uint32_t)};
++        RpcRequest second = first;
++        second.send = {0x810u, sizeof(secondPayload)};
++        second.receive = {0x910u, sizeof(uint32_t)};
++
++        const RpcResult firstResult = iop.handleRpc(first);
++        if (!expect(firstResult.handled && firstResult.pending && firstResult.pendingId != 0u,
++                    "An IOP server blocked on the EE must leave the EE call pending")) return 1;
++        if (!expect(host.postedGuestRpcs.size() == 1u && host.postedGuestRpcs[0].sid == eeSid &&
++                        host.postedGuestRpcs[0].function == 7u && host.postedGuestRpcs[0].receiveSize == 4u,
++                    "The IOP server thread did not post its IOP -> EE call")) return 1;
++        uint32_t forwarded = 0u;
++        std::memcpy(&forwarded, host.postedGuestRpcs[0].send.data(), sizeof(forwarded));
++        if (!expect(forwarded == firstPayload, "The EE request did not reach the IOP server buffer")) return 1;
++
++        const RpcResult secondResult = iop.handleRpc(second);
++        if (!expect(secondResult.handled && secondResult.pending &&
++                        secondResult.pendingId != firstResult.pendingId,
++                    "A call to a busy IOP server must be queued as pending")) return 1;
++        if (!expect(host.postedGuestRpcs.size() == 1u && host.completedIopRpcs.empty(),
++                    "A queued call ran while its server was still busy")) return 1;
++
++        const auto runIopUntil = [&](auto done) {
++            for (int i = 0; i < 200 && !done(); ++i)
++                iop.runEeCycles(100000u);
++        };
++        constexpr uint32_t firstReply = 0xCAFE0001u;
++        if (!expect(iop.completeGuestRpc(host.postedGuestRpcs[0].callId, &firstReply, sizeof(firstReply)),
++                    "The EE reply was not accepted by the IOP")) return 1;
++        runIopUntil([&] { return host.completedIopRpcs.size() >= 1u; });
++        uint32_t firstResponse = 0u;
++        std::memcpy(&firstResponse, host.guest.data() + 0x900u, sizeof(firstResponse));
++        if (!expect(host.completedIopRpcs.size() == 1u && host.completedIopRpcs[0] == firstResult.pendingId &&
++                        firstResponse == firstReply,
++                    "The pending EE -> IOP call did not finish with the server reply")) return 1;
++
++        // The queued call starts once the server is free and blocks on the EE in turn.
++        runIopUntil([&] { return host.postedGuestRpcs.size() >= 2u; });
++        if (!expect(host.postedGuestRpcs.size() == 2u, "The queued call did not start after the first one")) return 1;
++        std::memcpy(&forwarded, host.postedGuestRpcs[1].send.data(), sizeof(forwarded));
++        if (!expect(forwarded == secondPayload, "The queued call lost its own request")) return 1;
++        constexpr uint32_t secondReply = 0xCAFE0002u;
++        if (!expect(iop.completeGuestRpc(host.postedGuestRpcs[1].callId, &secondReply, sizeof(secondReply)),
++                    "The second EE reply was not accepted")) return 1;
++        runIopUntil([&] { return host.completedIopRpcs.size() >= 2u; });
++        uint32_t secondResponse = 0u;
++        std::memcpy(&secondResponse, host.guest.data() + 0x910u, sizeof(secondResponse));
++        if (!expect(host.completedIopRpcs.size() == 2u && host.completedIopRpcs[1] == secondResult.pendingId &&
++                        secondResponse == secondReply,
++                    "The queued EE -> IOP call did not finish with its own reply")) return 1;
++        host.eeServerSid = 0u;
++    }
++
+     iop.reset();
+     writeExportProviderIrx(host, 0x100u);
+     const ModuleLoadResult exportProvider = iop.loadModuleBuffer(0x100u);
 diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
-index ed54d34a..1b676063 100644
+index ed54d34..1b67606 100644
 --- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
 +++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
 @@ -153,6 +153,10 @@ namespace ps2_syscalls
@@ -751,7 +965,7 @@ index ed54d34a..1b676063 100644
      namespace
      {
 diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
-index 37f49d91..114c798b 100644
+index 37f49d9..114c798 100644
 --- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
 +++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
 @@ -25,4 +25,5 @@ namespace ps2_syscalls
@@ -761,7 +975,7 @@ index 37f49d91..114c798b 100644
 +    void completeIopRpc(PS2Runtime *runtime, uint64_t pendingId); // TWR: EE -> IOP call finished late
  }
 diff --git a/ps2xRuntime/src/lib/ps2_iop_host.cpp b/ps2xRuntime/src/lib/ps2_iop_host.cpp
-index 4d06f0b5..71a4518f 100644
+index 4d06f0b..71a4518 100644
 --- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
 +++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
 @@ -518,6 +518,11 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
@@ -777,7 +991,7 @@ index 4d06f0b5..71a4518f 100644
  {
      return ps2_syscalls::hasEeRpcServer(sid);
 diff --git a/ps2xRuntime/src/lib/ps2_iop_host.h b/ps2xRuntime/src/lib/ps2_iop_host.h
-index 4f2d1ee8..5cc06b68 100644
+index 4f2d1ee..5cc06b6 100644
 --- a/ps2xRuntime/src/lib/ps2_iop_host.h
 +++ b/ps2xRuntime/src/lib/ps2_iop_host.h
 @@ -84,6 +84,7 @@ public:
@@ -788,3 +1002,16 @@ index 4f2d1ee8..5cc06b68 100644
      bool postGuestRpc(uint32_t sid,
                        uint32_t function,
                        const void *send,
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 061682a..b49c42b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -44,7 +44,7 @@ double ps2GsWorkerTraceSeconds(); // GOW-Port: ps2_memory.cpp
+ // GOW-Port: audio device position for the movie A/V check (GOW_MPEG_DIAG, Kernel/Stubs/MPEG.cpp): frames the device
+ // has played (including silence fill) and frames the sound engine produced (= GOW_AUDIO_PCM file position).
+ std::atomic<uint64_t> g_gowAudioFramesPlayed{0};
+-std::atomic<uint64_t> g_gowAudioFramesProduced{0};
++extern std::atomic<uint64_t> g_gowAudioFramesProduced; // TWR: defined in ps2xIOP (iop_native_overrides.cpp)
+ #if !defined(PLATFORM_VITA)
+ bool ps2AudioOpenNamedDevice(void (*fill)(void *, unsigned int), unsigned int sampleRate); // ps2_audio_device.cpp
+ void ps2AudioCloseNamedDevice();
