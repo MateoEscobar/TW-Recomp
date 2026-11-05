@@ -1237,6 +1237,13 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
                 ps2xDispFlipInStream(this, value);   // [displatch] DISPFB1
             }
             ps2xPrivInStream(this, regOff, value);   // [s1fence]
+            // [TWR-27 s18] Same frame-boundary snapshot as write32. The Warriors flips with a 64-bit `sd` to
+            // DISPFB1, so only this path sees its swaps: without it the swap-latch never fired (swap counter 0)
+            // and the host always presented through the per-tick fallback that reads live VRAM.
+            if (regOff == 0x0070u && changed && m_displaySwapCallback)
+            {
+                m_displaySwapCallback();
+            }
         }
         return;
     }

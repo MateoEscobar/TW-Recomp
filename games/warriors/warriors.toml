@@ -134,6 +134,17 @@ stubs = [
   "sceDmaSend@0x004ABA08",
   "sceDmaSendN@0x004ABA70",
   "sceDmaPause@0x004ABB00",
+  "GetRomName@0x004D8868",
+  "__divdi3@0x004D90F0",
+]
+
+# Detected library-like functions without runtime handlers.
+# This is informational only; PS2Recomp ignores this list and recompiles them normally.
+untracked_stubs = [
+  # [TWR-27 s18] libm del juego: se recompila la original. exp/log/log10/pow/fabs son double por software
+  # ($a0 -> $v0) y los handlers del runtime eran float ($f12 -> $f0): devolvían basura (mismo fallo que
+  # god-of-war-recomp docs/COMPARACION_PCSX2.md, sin/fabs/floor). Los kernels float se recompilan también
+  # para conservar el redondeo de la FPU del EE. tools/check_libm_stubs.py impide volver a sustituirlas.
   "exp@0x004B8DB8",
   "log@0x004B9030",
   "log10@0x004B9178",
@@ -142,13 +153,6 @@ stubs = [
   "__kernel_cosf@0x004BD478",
   "__kernel_sinf@0x004BDF20",
   "fabs@0x004BE308",
-  "GetRomName@0x004D8868",
-  "__divdi3@0x004D90F0",
-]
-
-# Detected library-like functions without runtime handlers.
-# This is informational only; PS2Recomp ignores this list and recompiles them normally.
-untracked_stubs = [
   "sppp_phase_name@0x0041D3B0",
   "__fixunssfdi@0x0042B040",
   "__floatdidf@0x0042B138",

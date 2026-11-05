@@ -114,12 +114,4 @@ void sub_004AB828_0x4ab828(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtim
 void sub_004ABA08_0x4aba08(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
 void sub_004ABA70_0x4aba70(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
 void sub_004ABB00_0x4abb00(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004B8DB8_0x4b8db8(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004B9030_0x4b9030(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004B9178_0x4b9178(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004B92C0_0x4b92c0(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004BCF60_0x4bcf60(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004BD478_0x4bd478(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004BDF20_0x4bdf20(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
-void sub_004BE308_0x4be308(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
 void sub_004D90F0_0x4d90f0(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);

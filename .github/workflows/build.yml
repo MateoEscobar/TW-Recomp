@@ -31,6 +31,10 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 tools/check_function_bounds.py
 
+      - name: Check libm is recompiled, not stubbed
+        if: runner.os == 'Linux'
+        run: python3 tools/check_libm_stubs.py
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
