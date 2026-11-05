@@ -1,0 +1,790 @@
+diff --git a/ps2xIOP/include/ps2x/iop/iop_host.h b/ps2xIOP/include/ps2x/iop/iop_host.h
+index 1c5fd4df..ef7060c2 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_host.h
++++ b/ps2xIOP/include/ps2x/iop/iop_host.h
+@@ -145,6 +145,12 @@ namespace ps2x::iop
+             return false;
+         }
+ 
++        // TWR: a pending EE -> IOP call (RpcResult::pending) finished; its reply is already in the EE receive buffer.
++        virtual void completeIopRpc(uint64_t pendingId)
++        {
++            (void)pendingId;
++        }
++
+         // Deliver an IOP -> EE SIF command packet. The default keeps hosts
+         // which do not emulate the EE command dispatcher source-compatible.
+         virtual bool sendSifCommand(uint32_t commandId,
+diff --git a/ps2xIOP/include/ps2x/iop/iop_types.h b/ps2xIOP/include/ps2x/iop/iop_types.h
+index 34914409..9e9976f5 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_types.h
++++ b/ps2xIOP/include/ps2x/iop/iop_types.h
+@@ -104,6 +104,11 @@ namespace ps2x::iop
+         uint32_t guestFunction = 0;
+         uint32_t guestArguments[4]{};
+         uint32_t guestDefaultResultAddress = 0;
++        // TWR: the IOP server blocked on something only the EE can provide (an IOP -> EE call, or an IOP thread waiting
++        // for one). The reply is written later and announced through IopHost::completeIopRpc(pendingId); until then
++        // the caller behaves as on hardware: a blocking call waits, a NOWAIT call sees its client busy.
++        bool pending = false;
++        uint64_t pendingId = 0;
+     };
+ 
+     enum class SifTransferKind : uint32_t
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.cpp b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+index 3cdebe07..fdf5e425 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.cpp
++++ b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+@@ -4,6 +4,7 @@
+ #include "../iop_emulator_const.h"
+ 
+ #include <algorithm>
++#include <cstdio>
+ 
+ namespace ps2x::iop::detail
+ {
+@@ -335,6 +336,7 @@ namespace ps2x::iop::detail
+         case IopThreadState::Semaphore:
+         case IopThreadState::EventFlag:
+         case IopThreadState::EeRpc:
++        case IopThreadState::RpcLoop:
+             status = 0x04u;
+             break;
+         case IopThreadState::Suspended:
+@@ -752,6 +754,98 @@ namespace ps2x::iop::detail
+         return false;
+     }
+ 
++    int IopKernel::createServiceThread(uint32_t priority, uint32_t stackSize)
++    {
++        ++m_version;
++        IopThread thread;
++        thread.id = static_cast<int>(m_nextThreadId++);
++        thread.attr = 0x02000000u; // TH_C
++        thread.stackSize = std::max<uint32_t>(stackSize, 0x800u);
++        thread.priority = std::clamp<uint32_t>(priority, 1u, 126u);
++        thread.initialPriority = thread.priority;
++        thread.stackBase = m_memory.allocate(thread.stackSize + kStackGuardBytes, 16u);
++        if (thread.stackBase == 0u)
++            return -1;
++        const int id = thread.id;
++        m_threads.emplace(id, std::move(thread));
++        return id;
++    }
++
++    bool IopKernel::startServiceThread(int id, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t gp)
++    {
++        const auto it = m_threads.find(id);
++        if (it == m_threads.end() ||
++            (it->second.state != IopThreadState::Dormant && it->second.state != IopThreadState::RpcLoop))
++            return false;
++        ++m_version;
++        IopThread &thread = it->second;
++        const bool loop = thread.state == IopThreadState::RpcLoop;
++        // In sceSifRpcLoop the server function runs below the loop's frame, in the same thread (as sifcmd does), so a
++        // WakeupThread aimed at the thread that called sceSifRpcLoop reaches the server.
++        const uint32_t sp = loop ? ((thread.rpcLoopSp - 0x40u) & ~15u)
++                                 : ((thread.stackBase + thread.stackSize) & ~15u) - 16u;
++        const uint32_t loopSp = thread.rpcLoopSp;
++        thread.cpu = {};
++        thread.cpu.pc = entry;
++        thread.cpu.gpr[4] = a0;
++        thread.cpu.gpr[5] = a1;
++        thread.cpu.gpr[6] = a2;
++        thread.cpu.gpr[28] = gp;
++        thread.cpu.gpr[29] = sp;
++        thread.cpu.gpr[31] = loop ? kRpcServerReturnSentinel : kThreadReturnSentinel;
++        thread.rpcLoopSp = loopSp;
++        if (!loop)
++            thread.entry = entry;
++        thread.state = IopThreadState::Ready;
++        return true;
++    }
++
++    bool IopKernel::enterRpcLoop(IopCpuState &cpu)
++    {
++        if (m_currentThread == nullptr)
++            return false;
++        ++m_version;
++        m_currentThread->rpcLoopSp = cpu.gpr[29];
++        m_currentThread->state = IopThreadState::RpcLoop;
++        cpu.yielded = true;
++        return true;
++    }
++
++    bool IopKernel::isThreadFinished(int id) const
++    {
++        const auto it = m_threads.find(id);
++        return it == m_threads.end() || it->second.state == IopThreadState::Dormant ||
++               it->second.state == IopThreadState::RpcLoop;
++    }
++
++    uint32_t IopKernel::threadReturnValue(int id) const
++    {
++        const auto it = m_threads.find(id);
++        return it == m_threads.end() ? 0u : it->second.cpu.gpr[2];
++    }
++
++    std::string IopKernel::describeThreads() const
++    {
++        std::string out;
++        char line[160];
++        for (const auto &[id, thread] : m_threads)
++        {
++            std::snprintf(line, sizeof(line), " [t%d st=%d prio=%u pc=%08x ra=%08x wait=%d sem/evf=%d]", id,
++                          static_cast<int>(thread.state), thread.priority, thread.cpu.pc, thread.cpu.gpr[31],
++                          static_cast<int>(thread.state), thread.waitId);
++            out += line;
++        }
++        return out;
++    }
++
++    bool IopKernel::hasEeRpcWaiter() const noexcept
++    {
++        for (const auto &[id, thread] : m_threads)
++            if (thread.state == IopThreadState::EeRpc)
++                return true;
++        return false;
++    }
++
+     void IopKernel::delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu)
+     {
+         ++m_version; // GOW-Port: invalida la caché de beginNextReady
+@@ -820,7 +914,9 @@ namespace ps2x::iop::detail
+     void IopKernel::endTimeslice(IopThread &thread, uint32_t returnSentinel)
+     {
+         ++m_version; // GOW-Port: invalida la caché de beginNextReady
+-        if (thread.cpu.pc == returnSentinel || thread.cpu.stopped)
++        if (thread.cpu.pc == kRpcServerReturnSentinel && thread.rpcLoopSp != 0u)
++            thread.state = IopThreadState::RpcLoop; // TWR: back to sceSifRpcLoop, waiting for the next request
++        else if (thread.cpu.pc == returnSentinel || thread.cpu.stopped)
+             thread.state = IopThreadState::Dormant;
+         else if (thread.state == IopThreadState::Running)
+             thread.state = IopThreadState::Ready;
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.h b/ps2xIOP/src/emulator/core/iop_kernel.h
+index 83e8d71e..130177e0 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.h
++++ b/ps2xIOP/src/emulator/core/iop_kernel.h
+@@ -6,6 +6,7 @@
+ #include <cstdint>
+ #include <functional>
+ #include <map>
++#include <string>
+ 
+ namespace ps2x::iop::detail
+ {
+@@ -22,7 +23,8 @@ namespace ps2x::iop::detail
+         EventFlag,
+         Suspended,
+         Dead,
+-        EeRpc, // TWR: sceSifCallRpc to an EE server, waiting for its reply
++        EeRpc,   // TWR: sceSifCallRpc to an EE server, waiting for its reply
++        RpcLoop, // TWR: idle in sceSifRpcLoop, ready to run its queue's server functions
+     };
+ 
+     struct IopThread
+@@ -44,6 +46,7 @@ namespace ps2x::iop::detail
+         uint32_t waitResultAddress = 0;
+         int wakeupCount = 0;
+         uint64_t eeRpcCall = 0; // TWR: IopThreadState::EeRpc
++        uint32_t rpcLoopSp = 0; // TWR: stack pointer when the thread entered sceSifRpcLoop
+     };
+ 
+     class IopKernel
+@@ -64,6 +67,22 @@ namespace ps2x::iop::detail
+         // TWR: blocks the current thread until wakeEeRpcWaiter(callId); false when there is no current thread.
+         [[nodiscard]] bool waitCurrentForEeRpc(uint64_t callId, IopCpuState &cpu);
+         bool wakeEeRpcWaiter(uint64_t callId, uint32_t result);
++
++        // TWR: hilos internos para los servidores RPC del IOP. En el IOP real la función del servidor corre en el hilo
++        // que llamó a sceSifRpcLoop, así que puede bloquearse (WaitSema, una llamada al EE...) sin bloquear al EE.
++        [[nodiscard]] int createServiceThread(uint32_t priority, uint32_t stackSize);
++        // Starts a server call on a service thread (Dormant) or on a thread idle in sceSifRpcLoop (RpcLoop).
++        bool startServiceThread(int id, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t gp);
++        // sceSifRpcLoop: the current thread stays serving its queue; false when there is no current thread.
++        bool enterRpcLoop(IopCpuState &cpu);
++        [[nodiscard]] bool isThreadFinished(int id) const;
++        [[nodiscard]] uint32_t threadReturnValue(int id) const;
++        [[nodiscard]] bool hasEeRpcWaiter() const noexcept;
++        [[nodiscard]] std::string describeThreads() const; // TWR: diagnóstico
++        [[nodiscard]] uint32_t currentThreadPriority(uint32_t fallback) const noexcept
++        {
++            return m_currentThread != nullptr ? m_currentThread->priority : fallback;
++        }
+         void delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu);
+ 
+         [[nodiscard]] IopThread *beginNextReady(uint64_t currentCycle);
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 2ece3faf..9721389d 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -445,7 +445,7 @@ namespace ps2x::iop::detail
+         {
+             if (cpu.stopped)
+                 return false;
+-            if (cpu.pc == kThreadReturnSentinel || cpu.pc == kCallReturnSentinel)
++            if (cpu.pc == kThreadReturnSentinel || cpu.pc == kCallReturnSentinel || cpu.pc == kRpcServerReturnSentinel)
+             {
+                 cpu.stopped = true;
+                 return false;
+@@ -613,6 +613,24 @@ namespace ps2x::iop::detail
+         }
+         bool settlingThreads = false;
+ 
++        // TWR: an EE -> IOP call runs its server thread here until it returns. It stops early when no IOP thread is
++        // ready while one waits for the EE (only the EE can unblock it): the call then completes asynchronously.
++        bool runUntil(const std::function<bool()> &done, uint64_t maxCycles) override
++        {
++            if (done())
++                return true;
++            if (activeCpu != nullptr)
++                return false;
++            const uint64_t start = totalCycles;
++            while (!done() && totalCycles - start < maxCycles)
++            {
++                if (!kernel.hasReadyThread() && kernel.hasEeRpcWaiter())
++                    break;
++                runCycles(kDefaultSlice);
++            }
++            return done();
++        }
++
+         // GOW-Port: una espera sin hilo actual (p. ej. WaitSema en un servidor RPC) deja correr a los hilos del IOP,
+         // como haria el IOP real al bloquear al hilo RPC, hasta que la condicion se cumple o pasa kMaxOutsideWaitCycles.
+         bool waitOutsideThread(const std::function<bool()> &ready)
+@@ -947,6 +965,73 @@ namespace ps2x::iop::detail
+             return result;
+         }
+ 
++        // TWR: the export tables (magic 0x41C00000, name at +12, functions from +20) in a relocated module image.
++        std::unordered_map<std::string, std::vector<uint32_t>> moduleExports(uint32_t lo, uint32_t size)
++        {
++            std::unordered_map<std::string, std::vector<uint32_t>> exports;
++            for (uint32_t at = lo; at + 24u <= lo + size && at + 24u <= kRamSize; at += 4u)
++            {
++                if (memory.read32(at) != 0x41C00000u)
++                    continue;
++                std::string name;
++                for (uint32_t i = 0; i < 8u; ++i)
++                {
++                    const char ch = static_cast<char>(memory.read8(at + 12u + i));
++                    if (ch == '\0')
++                        break;
++                    name += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
++                }
++                std::vector<uint32_t> functions;
++                for (uint32_t cursor = at + 20u; cursor + 4u <= kRamSize && functions.size() < 1024u; cursor += 4u)
++                {
++                    const uint32_t function = memory.read32(cursor);
++                    if (function == 0u)
++                        break;
++                    functions.push_back(physicalAddress(function));
++                }
++                exports.emplace(std::move(name), std::move(functions));
++            }
++            return exports;
++        }
++
++        void attachNativeOverrides(const Module &module, uint32_t lo, std::string ident)
++        {
++            // "LIBSD.IRX;1" (disc path with ISO version) and "LIBSD.IRX" are the same module.
++            if (const size_t semicolon = ident.find("_irx_"); semicolon != std::string::npos)
++                ident.resize(semicolon + 4u);
++            size_t overrideCount = 0;
++            const IopNativeOverride *overrides = iopNativeOverrides(overrideCount);
++            const auto exports = moduleExports(lo, std::max(module.size, module.textSize));
++            const auto exported = [&](const IopNativeOverride &o) -> uint32_t
++            {
++                if (o.library == nullptr || o.ordinal < 0)
++                    return 0u;
++                const auto library = exports.find(o.library);
++                if (library == exports.end() || static_cast<size_t>(o.ordinal) >= library->second.size())
++                    return 0u;
++                return library->second[static_cast<size_t>(o.ordinal)];
++            };
++            bool sameBuild = true;
++            for (size_t i = 0; i < overrideCount; ++i)
++                if (ident == overrides[i].module && overrides[i].ordinal >= 0 && exported(overrides[i]) != lo + overrides[i].offset)
++                    sameBuild = false;
++            std::ostringstream skipped;
++            for (size_t i = 0; i < overrideCount; ++i)
++            {
++                const IopNativeOverride &o = overrides[i];
++                if (ident != o.module)
++                    continue;
++                if (const uint32_t address = exported(o); address != 0u && address >= lo && address < lo + module.textSize)
++                    nativeOverrides[address] = &o;
++                else if (sameBuild && o.offset < module.textSize)
++                    nativeOverrides[lo + o.offset] = &o;
++                else
++                    skipped << ' ' << o.name;
++            }
++            if (!skipped.str().empty())
++                log(LogLevel::Info, "[IOP] " + module.name + ": native overrides not applied (other build):" + skipped.str());
++        }
++
+         // Finds the compiled form of a freshly relocated module (same base, same code bytes) and, with
+         // PS2X_IOP_DUMP_MODULES=<dir>, writes the code for tools/iop/iopn_gen.py (<dir>/<name>.bin + modules.txt).
+         void attachNative(const Module &module)
+@@ -970,13 +1055,7 @@ namespace ps2x::iop::detail
+             }
+             static const bool disabled = [] { const char *v = std::getenv("PS2X_IOP_NATIVE"); return v && v[0] == '0'; }();
+             if (!disabled)
+-            {
+-                size_t overrideCount = 0;
+-                const IopNativeOverride *overrides = iopNativeOverrides(overrideCount);
+-                for (size_t i = 0; i < overrideCount; ++i)
+-                    if (ident == overrides[i].module && overrides[i].offset < module.textSize)
+-                        nativeOverrides[lo + overrides[i].offset] = &overrides[i];
+-            }
++                attachNativeOverrides(module, lo, ident);
+             size_t count = 0;
+             const IopNativeModule *table = iopNativeModules(count);
+             std::ostringstream out;
+@@ -1152,11 +1231,14 @@ namespace ps2x::iop::detail
+         m_impl->pendingIopCycles = 0;
+         if (cycles != 0u)
+             m_impl->runCycles(cycles);
++        m_impl->rpc.pollPendingServerCalls(); // TWR: EE -> IOP calls that went asynchronous
+     }
+ 
+     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
+     {
+-        return m_impl->rpc.handleRpc(request, *m_impl);
++        RpcResult result = m_impl->rpc.handleRpc(request, *m_impl);
++        m_impl->rpc.pollPendingServerCalls(); // TWR: other servers may have finished while this one ran
++        return result;
+     }
+ 
+     bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
+diff --git a/ps2xIOP/src/emulator/iop_emulator_const.h b/ps2xIOP/src/emulator/iop_emulator_const.h
+index 53e672ed..8fe7855a 100644
+--- a/ps2xIOP/src/emulator/iop_emulator_const.h
++++ b/ps2xIOP/src/emulator/iop_emulator_const.h
+@@ -3,6 +3,7 @@
+ 
+ constexpr uint32_t kThreadReturnSentinel = 0x1FFFFF00u;
+ constexpr uint32_t kCallReturnSentinel = 0x1FFFFF04u;
++constexpr uint32_t kRpcServerReturnSentinel = 0x1FFFFF08u; // TWR: an RPC server function returned to sceSifRpcLoop
+ constexpr uint64_t kIopClockHz = 36'864'000ull;
+ // NTSC field cadence (approximately 59.94 Hz).  VBlank imports are
+ // scheduler waits, not no-op timing hints: returning immediately lets
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index 5e815942..9fcc158c 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <cstdlib>
+ #include <sstream>
++#include <string>
+ #include <array>
+ #include <cstring>
+ #include <limits>
+@@ -17,6 +18,7 @@ namespace ps2x::iop::detail
+ {
+     // GOW-Port: tope de ciclos del IOP que se dejan correr tras cada RPC (~0.1 s a 36.864 MHz).
+     constexpr uint64_t kRpcSettleCycles = 4000000u;
++    constexpr uint64_t kRpcSyncCycles = 36864000u; // TWR: ~1 s of IOP time before the call goes asynchronous
+ 
+     IopRpcBridge::IopRpcBridge(IopHost &host, IopMemory &memory, IopKernel &kernel) noexcept
+         : m_host(host), m_memory(memory), m_kernel(kernel)
+@@ -28,6 +30,7 @@ namespace ps2x::iop::detail
+         m_servers.clear();
+         m_eeClients.clear();
+         m_eeCalls.clear();
++        m_queueThreads.clear();
+         m_nextEeCall = 1u;
+         m_nextDmaId = 1u;
+         m_sifInitialized = false;
+@@ -327,6 +330,9 @@ namespace ps2x::iop::detail
+             server.callback = m_memory.read32(stackPointer + 16u);
+             server.callbackBuffer = m_memory.read32(stackPointer + 20u);
+             server.queue = m_memory.read32(stackPointer + 24u);
++            server.priority = m_kernel.currentThreadPriority(0x20u);
++            if (const auto loop = m_queueThreads.find(server.queue); loop != m_queueThreads.end())
++                server.thread = loop->second; // TWR: served by the thread of its queue (sceSifRpcLoop)
+             m_servers[server.sid] = server;
+             if (server.serverData != 0u)
+             {
+@@ -346,15 +352,18 @@ namespace ps2x::iop::detail
+                       : 0u);
+             return true;
+         }
+-        case 19: // SetRpcQueue
++        case 19: // SetRpcQueue(qd, thread_id)
++            m_queueThreads[cpu.gpr[4]] = static_cast<int>(cpu.gpr[5]); // TWR: the thread that serves this queue
+             setV0(cpu.gpr[4]);
+             return true;
+         case 20:
+         case 21:
+             setV0(0);
+             return true;
+-        case 22: // RpcLoop
+-            m_kernel.sleepCurrent(cpu);
++        case 22: // RpcLoop(qd)
++            // TWR: the thread stays serving its queue: each EE call runs the server function in it (handleRpc).
++            if (!m_kernel.enterRpcLoop(cpu))
++                m_kernel.sleepCurrent(cpu);
+             setV0(0);
+             return true;
+         case 23: // sceSifGetOtherData(rd, eeSrc, iopDest, size, mode)
+@@ -416,8 +425,52 @@ namespace ps2x::iop::detail
+         const auto serverIt = m_servers.find(request.sid);
+         if (serverIt == m_servers.end() || serverIt->second.function == 0u)
+             return result;
+-
+         RpcServer &server = serverIt->second;
++
++        // TWR: the server function runs in its own IOP thread, as in sifcmd (the thread blocked in sceSifRpcLoop). It
++        // used to run nested inside the EE call: a server that waited for an IOP thread which in turn waited for the
++        // EE could never finish (The Warriors: MultiStream sid 0x12345 -> "[IOP] wait outside a thread timed out").
++        if (server.thread == 0)
++            server.thread = m_kernel.createServiceThread(server.priority, 0x2000u);
++        const uint64_t pendingId = m_nextPendingId++;
++        result.handled = true;
++        result.resultAddress = request.receive.address;
++        result.serverDispatchPolicy = ServerDispatchPolicy::Suppress;
++        result.signalNowaitCompletion = true;
++        result.signalCompletion = true;
++        if (server.thread <= 0)
++            return RpcResult{};
++        if (server.busy || !m_kernel.isThreadFinished(server.thread))
++        {
++            server.queued.emplace_back(pendingId, request);
++            result.pending = true;
++            result.pendingId = pendingId;
++            return result;
++        }
++
++        startServerCall(server, request, pendingId);
++        const int thread = server.thread;
++        if (executor.runUntil([this, thread] { return m_kernel.isThreadFinished(thread); }, kRpcSyncCycles))
++        {
++            // GOW-Port: en el IOP real, si el servidor despierta a un hilo de mas prioridad (smpd: su hilo lector),
++            // ese hilo se ejecuta antes de que el hilo RPC conteste. Sin esto, smpd tomaba el destino de la lectura
++            // de la peticion siguiente y los datos acababan en el bufer equivocado.
++            executor.runReadyThreads(kRpcSettleCycles);
++            finishServerCall(server);
++            return result;
++        }
++        server.async = true;
++        result.pending = true;
++        result.pendingId = pendingId;
++        static const bool tracePending = std::getenv("PS2X_TRACE_IOP_PENDING") != nullptr;
++        if (tracePending)
++            m_host.log(LogLevel::Info, "[iop-pending] server thread " + std::to_string(server.thread) +
++                                           " blocked; IOP threads:" + m_kernel.describeThreads());
++        return result;
++    }
++
++    void IopRpcBridge::startServerCall(RpcServer &server, const RpcRequest &request, uint64_t pendingId)
++    {
+         if (request.send.size != 0u && server.buffer != 0u)
+         {
+             const uint32_t copySize = std::min<uint32_t>(request.send.size, IopMemory::RamSize - std::min(server.buffer, IopMemory::RamSize));
+@@ -428,19 +481,20 @@ namespace ps2x::iop::detail
+                     (void)m_memory.writeRam(server.buffer, payload.data(), payload.size());
+             }
+         }
++        server.busy = true;
++        server.async = false;
++        server.pendingId = pendingId;
++        server.request = request;
++        (void)m_kernel.startServiceThread(server.thread, server.function, request.function, server.buffer,
++                                          request.send.size, server.gp);
++    }
+ 
+-        uint32_t returnPointer = executor.executeGuestFunction(server.function,
+-                                                               request.function,
+-                                                               server.buffer,
+-                                                               request.send.size,
+-                                                               0u,
+-                                                               server.gp);
+-        // GOW-Port: en el IOP real, si el servidor despierta a un hilo de mas prioridad (smpd: su hilo lector),
+-        // ese hilo se ejecuta antes de que el hilo RPC conteste. Sin esto, smpd tomaba el destino de la lectura
+-        // de la peticion siguiente y los datos acababan en el bufer equivocado.
+-        executor.runReadyThreads(kRpcSettleCycles);
++    void IopRpcBridge::finishServerCall(RpcServer &server)
++    {
++        uint32_t returnPointer = m_kernel.threadReturnValue(server.thread);
+         if (returnPointer == 0u)
+             returnPointer = server.buffer;
++        const RpcRequest &request = server.request;
+         if (request.receive.address != 0u && request.receive.size != 0u && returnPointer != 0u)
+         {
+             const uint32_t physical = IopMemory::physicalAddress(returnPointer);
+@@ -452,13 +506,32 @@ namespace ps2x::iop::detail
+                     (void)m_host.zeroGuest(request.receive.address + copySize, request.receive.size - copySize);
+             }
+         }
++        server.busy = false;
++    }
+ 
+-        result.handled = true;
+-        result.resultAddress = request.receive.address;
+-        result.serverDispatchPolicy = ServerDispatchPolicy::Suppress;
+-        result.signalNowaitCompletion = true;
+-        result.signalCompletion = true;
+-        return result;
++    void IopRpcBridge::pollPendingServerCalls()
++    {
++        if (m_polling)
++            return;
++        m_polling = true;
++        for (auto &[sid, server] : m_servers)
++        {
++            if (server.busy && server.async && m_kernel.isThreadFinished(server.thread))
++            {
++                const uint64_t finished = server.pendingId;
++                finishServerCall(server);
++                m_host.completeIopRpc(finished);
++            }
++            // Calls that arrived while the server was busy, or before its thread reached sceSifRpcLoop.
++            if (!server.busy && !server.queued.empty() && m_kernel.isThreadFinished(server.thread))
++            {
++                auto next = std::move(server.queued.front());
++                server.queued.pop_front();
++                startServerCall(server, next.second, next.first);
++                server.async = true; // already reported pending to the EE
++            }
++        }
++        m_polling = false;
+     }
+ 
+     void IopRpcBridge::onSifTransfer(const SifTransfer &transfer)
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.h b/ps2xIOP/src/emulator/services/iop_rpc.h
+index cc0caf1f..1747725a 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.h
++++ b/ps2xIOP/src/emulator/services/iop_rpc.h
+@@ -4,6 +4,8 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <deque>
++#include <functional>
+ #include <unordered_map>
+ 
+ namespace ps2x::iop
+@@ -44,6 +46,12 @@ namespace ps2x::iop::detail
+         {
+             (void)maxCycles;
+         }
++        // TWR: run the IOP until done() or until no thread can progress without the EE (or maxCycles pass).
++        virtual bool runUntil(const std::function<bool()> &done, uint64_t maxCycles)
++        {
++            (void)maxCycles;
++            return done();
++        }
+     };
+ 
+     class IopRpcBridge
+@@ -55,6 +63,8 @@ namespace ps2x::iop::detail
+         [[nodiscard]] bool dispatchSifManImport(uint16_t ordinal, IopCpuState &cpu);
+         [[nodiscard]] bool dispatchSifCmdImport(uint16_t ordinal, IopCpuState &cpu);
+         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request, IopGuestExecutor &executor);
++        // TWR: finishes EE -> IOP calls whose server thread has returned (called after every IOP run).
++        void pollPendingServerCalls();
+         void onSifTransfer(const SifTransfer &transfer);
+         void removeServersInRange(uint32_t base, uint32_t size);
+ 
+@@ -92,8 +102,18 @@ namespace ps2x::iop::detail
+             uint32_t callback = 0;
+             uint32_t callbackBuffer = 0;
+             uint32_t queue = 0;
++            uint32_t priority = 0x20; // TWR: priority of the thread that registered it (its sceSifRpcLoop thread)
++            int thread = 0;           // TWR: service thread that runs the server function
++            bool busy = false;
++            bool async = false;       // the call in flight was reported pending to the EE
++            uint64_t pendingId = 0;
++            RpcRequest request{};
++            std::deque<std::pair<uint64_t, RpcRequest>> queued;
+         };
+ 
++        void startServerCall(RpcServer &server, const RpcRequest &request, uint64_t pendingId);
++        void finishServerCall(RpcServer &server);
++
+         struct EeRpcClient // TWR: IOP client bound to an EE server
+         {
+             uint32_t sid = 0;
+@@ -118,6 +138,9 @@ namespace ps2x::iop::detail
+         std::unordered_map<uint32_t, EeRpcClient> m_eeClients;
+         std::unordered_map<uint64_t, EeRpcCall> m_eeCalls;
+         uint64_t m_nextEeCall = 1u;
++        uint64_t m_nextPendingId = 1u;
++        std::unordered_map<uint32_t, int> m_queueThreads; // TWR: SetRpcQueue(qd, thread)
++        bool m_polling = false;
+         uint32_t m_nextDmaId = 1u;
+         bool m_sifInitialized = false;
+     };
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+index ed54d34a..1b676063 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+@@ -153,6 +153,10 @@ namespace ps2_syscalls
+ 
+     } // namespace
+ 
++    // TWR: EE -> IOP calls that the IOP finishes later (RpcResult::pending).
++    constexpr uint32_t kIopRpcPendingWaitType = 0x49525043u; // 'IRPC'
++    inline std::unordered_map<uint64_t, std::function<void()>> g_pending_nowait_iop_rpcs;
++
+     void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         const int32_t moduleId = static_cast<int32_t>(getRegU32(ctx, 4)); // $a0
+@@ -548,14 +552,17 @@ namespace ps2_syscalls
+ 
+             iopResult = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
+ 
+-            if (iopResult.signalNowaitCompletion &&
+-                (mode & kSifRpcModeNowait) != 0u)
+-            {
+-                (void)signalRpcCompletionSema(runtime, completionSemaphore);
+-            }
+-            if (iopResult.signalCompletion)
++            if (!iopResult.pending) // TWR: a pending call signals when its reply arrives
+             {
+-                (void)signalRpcCompletionSema(runtime, completionSemaphore);
++                if (iopResult.signalNowaitCompletion &&
++                    (mode & kSifRpcModeNowait) != 0u)
++                {
++                    (void)signalRpcCompletionSema(runtime, completionSemaphore);
++                }
++                if (iopResult.signalCompletion)
++                {
++                    (void)signalRpcCompletionSema(runtime, completionSemaphore);
++                }
+             }
+         }
+ 
+@@ -684,6 +691,68 @@ namespace ps2_syscalls
+             runtime->eeScheduler().invokeCurrent(std::move(callback));
+         };
+ 
++        if (iopResult.pending)
++        {
++            // TWR: the IOP server is blocked on the EE (see RpcResult::pending). As on hardware, a blocking call waits
++            // for the reply and a NOWAIT call returns now with its client busy until the SIF completion arrives.
++            const bool nowait = (mode & kSifRpcModeNowait) != 0u;
++            static const bool tracePending = std::getenv("PS2X_TRACE_IOP_PENDING") != nullptr;
++            if (tracePending)
++                std::cerr << "[iop-pending] start id=" << iopResult.pendingId << " sid=0x" << std::hex << sid << std::dec
++                          << " fn=" << rpcNum << " nowait=" << nowait << " end=0x" << std::hex << endFunction << std::dec
++                          << std::endl;
++            const bool signalNowait = iopResult.signalNowaitCompletion;
++            const bool signalDone = iopResult.signalCompletion;
++            auto signalSemas = [=]()
++            {
++                if (signalNowait && nowait)
++                    (void)signalRpcCompletionSema(runtime, completionSemaphore);
++                if (signalDone)
++                    (void)signalRpcCompletionSema(runtime, completionSemaphore);
++            };
++            if (!nowait)
++            {
++                runtime->eeScheduler().waitExternal(EeWaitReason::External, kIopRpcPendingWaitType, iopResult.pendingId,
++                                                    [signalSemas, finishCall](R5900Context &resumed)
++                                                    {
++                                                        signalSemas();
++                                                        finishCall(nullptr, resumed);
++                                                    });
++            }
++            const R5900Context caller = *ctx;
++            g_pending_nowait_iop_rpcs[iopResult.pendingId] = [=]()
++            {
++                signalSemas();
++                auto release = [=]()
++                {
++                    std::lock_guard<std::mutex> lock(g_rpc_mutex);
++                    g_rpc_clients[clientPtr].busy = false;
++                };
++                uint32_t callbackFunction = endFunction;
++                if (callbackFunction != 0u && !runtime->hasFunction(callbackFunction) && callbackFunction >= 0x10000u &&
++                    runtime->hasFunction(callbackFunction - 0x10000u))
++                    callbackFunction -= 0x10000u;
++                if (callbackFunction == 0u || iopResult.callbackPolicy == ps2x::iop::CallbackPolicy::Suppress ||
++                    !runtime->hasFunction(callbackFunction))
++                {
++                    release();
++                    return;
++                }
++                // The end function runs like the SIF interrupt callback of hardware.
++                GuestInvocation callback{};
++                callback.kind = GuestInvocationKind::RpcCallback;
++                callback.context = caller;
++                callback.context.pc = callbackFunction;
++                SET_GPR_U32(&callback.context, 4, endParameter);
++                SET_GPR_U32(&callback.context, 29, 0u);
++                SET_GPR_U32(&callback.context, 31, 0u);
++                callback.onComplete = [release](const R5900Context &, R5900Context &) { release(); };
++                runtime->eeScheduler().queueInvocation(std::move(callback));
++            };
++            setReturnS32(ctx, 0);
++            return;
++        }
++
+         if (serverDispatched)
+         {
+             GuestInvocation invocation{};
+@@ -1006,6 +1075,23 @@ namespace ps2_syscalls
+         setReturnS32(ctx, static_cast<int32_t>(queuePtr));
+     }
+ 
++    void completeIopRpc(PS2Runtime *runtime, uint64_t pendingId)
++    {
++        static const bool tracePending = std::getenv("PS2X_TRACE_IOP_PENDING") != nullptr;
++        if (tracePending)
++            std::cerr << "[iop-pending] done id=" << pendingId << std::endl;
++        const auto nowait = g_pending_nowait_iop_rpcs.find(pendingId);
++        if (nowait != g_pending_nowait_iop_rpcs.end())
++        {
++            auto finish = std::move(nowait->second);
++            g_pending_nowait_iop_rpcs.erase(nowait);
++            finish();
++            return;
++        }
++        // A blocking caller waits in waitExternal; it resumes at the next scheduler checkpoint.
++        runtime->postEeEvent(EeEvent{EeEventType::ExternalWake, kIopRpcPendingWaitType, pendingId});
++    }
++
+     // ---- TWR: IOP -> EE RPC -------------------------------------------------------------------------------
+     namespace
+     {
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
+index 37f49d91..114c798b 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
+@@ -25,4 +25,5 @@ namespace ps2_syscalls
+     bool postIopRpcToEe(PS2Runtime *runtime, uint32_t sid, uint32_t function, const void *send, uint32_t sendSize,
+                         uint32_t receiveSize, uint64_t callId);
+     void SifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++    void completeIopRpc(PS2Runtime *runtime, uint64_t pendingId); // TWR: EE -> IOP call finished late
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.cpp b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+index 4d06f0b5..71a4518f 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -518,6 +518,11 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
+                                          packetSize);
+ }
+ 
++void PS2IopHostAdapter::completeIopRpc(uint64_t pendingId)
++{
++    ps2_syscalls::completeIopRpc(&m_runtime, pendingId);
++}
++
+ bool PS2IopHostAdapter::hasGuestRpcServer(uint32_t sid) const
+ {
+     return ps2_syscalls::hasEeRpcServer(sid);
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.h b/ps2xRuntime/src/lib/ps2_iop_host.h
+index 4f2d1ee8..5cc06b68 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.h
++++ b/ps2xRuntime/src/lib/ps2_iop_host.h
+@@ -84,6 +84,7 @@ public:
+                              uint32_t *resultAddress) override;
+     bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override;
+     bool hasGuestRpcServer(uint32_t sid) const override; // TWR: IOP -> EE RPC
++    void completeIopRpc(uint64_t pendingId) override;    // TWR: EE -> IOP call finished late
+     bool postGuestRpc(uint32_t sid,
+                       uint32_t function,
+                       const void *send,
