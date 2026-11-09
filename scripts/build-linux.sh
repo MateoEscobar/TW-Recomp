@@ -76,7 +76,16 @@ EOF
             DEPS_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_${name^^}=$src")
         done
     fi
-    cmake -S "$REC" -B "$BLD" -G Ninja "${DEPS_ARGS[@]}" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+    # VU1 nativa (decisión 22): micromemorias capturadas con GOW_VU1_CAPTURA + generadores de tools/vu1.
+    # Son datos del juego (games/warriors/vu1_micro, gitignorado); sin ellas el runner usa solo el intérprete.
+    VU1_ARGS=()
+    if compgen -G "$ROOT/games/warriors/vu1_micro/*.bin" >/dev/null; then
+        VU1_ARGS+=("-DPS2X_VU1_MICROCODE_DIR=$ROOT/games/warriors/vu1_micro"
+                   "-DPS2X_VU1_GENERATOR_SOURCE=$ROOT/tools/vu1/generar_vu1.cpp"
+                   # El CMake de GoW busca vu1n_gen.py en ../../../tools/vu1 (su propia disposición); aquí hay que indicarlo.
+                   "-DPS2X_VU1N_GEN_OVERRIDE=$ROOT/tools/vu1/vu1n_gen.py")
+    fi
+    cmake -S "$REC" -B "$BLD" -G Ninja "${DEPS_ARGS[@]}" "${VU1_ARGS[@]}" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
         -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 \
         -DPS2X_ENABLE_RUNNER_UNITY_BUILD=ON -DPS2X_ENABLE_RUNNER_PCH=ON >/dev/null
 
