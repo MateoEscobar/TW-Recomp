@@ -81,9 +81,14 @@ EOF
     VU1_ARGS=()
     if compgen -G "$ROOT/games/warriors/vu1_micro/*.bin" >/dev/null; then
         VU1_ARGS+=("-DPS2X_VU1_MICROCODE_DIR=$ROOT/games/warriors/vu1_micro"
-                   "-DPS2X_VU1_GENERATOR_SOURCE=$ROOT/tools/vu1/generar_vu1.cpp"
-                   # El CMake de GoW busca vu1n_gen.py en ../../../tools/vu1 (su propia disposición); aquí hay que indicarlo.
-                   "-DPS2X_VU1N_GEN_OVERRIDE=$ROOT/tools/vu1/vu1n_gen.py")
+                   "-DPS2X_VU1_GENERATOR_SOURCE=$ROOT/tools/vu1/generar_vu1.cpp")
+    # Backend VU1 "nativo lean" (vu1n_gen.py): OPT-IN con TWR_VU1N=1. Con las 39 micromemorias da ~+25 % pero la
+    # pelea muestra polígonos gigantes/pantalla negra (4 de 40 capturas, 0 de 40 sin él; GOW_VU1N_VERIFY: 602/2000
+    # ejecuciones con MAC final distinto). Sin él, el microcódigo compilado por pares ya da ~40-55 imágenes/s.
+    # El CMake de GoW busca vu1n_gen.py en ../../../tools/vu1 (su disposición): hay que indicarlo con el override.
+    if [[ "${TWR_VU1N:-0}" == "1" ]]; then
+        VU1_ARGS+=("-DPS2X_VU1N_GEN_OVERRIDE=$ROOT/tools/vu1/vu1n_gen.py")
+    fi
     fi
     cmake -S "$REC" -B "$BLD" -G Ninja "${DEPS_ARGS[@]}" "${VU1_ARGS[@]}" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
         -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 \

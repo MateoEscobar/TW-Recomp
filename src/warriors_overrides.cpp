@@ -72,8 +72,23 @@ namespace
             std::fprintf(stderr, "[twr-pad] state#%u -> %d\n", g_padStates.load(), static_cast<int>(getRegU32(ctx, 2)));
     }
 
+    // VU1: el backend "nativo lean" de GoW queda apagado por defecto (TWR_VU1N=1 lo activa). Con él habilitado y sin
+    // bloques generados, el despachador salta el microcódigo compilado por pares y cae al intérprete (49 ns/ciclo frente
+    // a 7,8); con los bloques generados, la pelea muestra polígonos gigantes (ver docs/vu1-nativa.md).
+    void selectVu1Backend()
+    {
+        if (std::getenv("TWR_VU1N") != nullptr || std::getenv("GOW_VU1_NATIVE_OFF") != nullptr)
+            return;
+#if defined(_WIN32)
+        _putenv_s("GOW_VU1_NATIVE_OFF", "1");
+#else
+        setenv("GOW_VU1_NATIVE_OFF", "1", 0);
+#endif
+    }
+
     void applyWarriorsOverrides(PS2Runtime &runtime)
     {
+        selectVu1Backend();
         startThreadWatch(runtime);
         if (std::getenv("TWR_PAD_DIAG"))
         {
