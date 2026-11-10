@@ -61,9 +61,9 @@ namespace
         ps2_stubs::scePadRead(rdram, ctx, runtime);
         const uint32_t n = ++g_padReads;
         const uint8_t *p = rdram + (data & 0x01FFFFFFu);
-        if (n % 120u == 1u || p[2] != 0xFFu || p[3] != 0xFFu)
-            std::fprintf(stderr, "[twr-pad] read#%u port=%u ret=%d b=%02x%02x %02x%02x\n", n, getRegU32(ctx, 4),
-                         static_cast<int>(getRegU32(ctx, 2)), p[0], p[1], p[2], p[3]);
+        if (n % 120u == 1u || p[2] != 0xFFu || p[3] != 0xFFu || p[6] != 0x80u || p[7] != 0x80u)
+            std::fprintf(stderr, "[twr-pad] read#%u port=%u ret=%d b=%02x%02x %02x%02x sticks(rx ry lx ly)=%02x %02x %02x %02x\n", n,
+                         getRegU32(ctx, 4), static_cast<int>(getRegU32(ctx, 2)), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
     }
     void diagPadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {

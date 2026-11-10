@@ -1,0 +1,50 @@
+diff --git a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+--- a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -499,6 +499,9 @@
+     GLuint presentProgram = 0, presentVao = 0, presentFbo = 0, presentTex = 0;
+     GLint locPresentSrc = -1, locPresentOffset = -1, locPresentEdge = -1;
+     uint32_t presentW = 0, presentH = 0;
++    // TWR: last presented picture with content, and how many empty ones in a row followed it (see Present()).
++    std::vector<uint8_t> lastGoodPixels;
++    int emptyPresentRun = 0;
+     GLuint shuffleProgram = 0, shuffleVao = 0, shuffleVbo = 0;
+     GLint locShTexa = -1;
+     GLint locShInvSize = -1, locShSrc = -1, locShSrcZ = -1, locShZMax = -1, locShHs = -1, locShHd = -1, locShScale = -1;
+@@ -2778,6 +2781,36 @@
+         return PresentationFrame{};
+     }
+     g.ReadPixels(0, 0, outW, outH, kRgba, kUnsignedByte, frame.pixels.data());
++    // TWR: two defects of the RAM-frames path on Linux (EGL), seen as a constantly flickering screen:
++    //  - the displayed picture is opaque, but the "alpha = 1" pass above left alpha 0 in part of the frames, and the host
++    //    window draws the texture with blending, so those frames showed through as black: force the alpha here;
++    //  - about 1 present in 12 (more when the machine is busy) is composed from a render target that holds nothing yet,
++    //    an entirely black picture between two good ones. Repeat the last good picture instead, for at most 2 presents in
++    //    a row, so a real fade to black still shows (two frames late). The cause of the empty compose is not found yet.
++    {
++        const size_t pixelCount = frame.pixels.size() / 4u;
++        bool hasImage = false;
++        uint8_t *bytes = frame.pixels.data();
++        for (size_t i = 0; i < pixelCount; ++i)
++        {
++            uint32_t value;
++            std::memcpy(&value, bytes + i * 4u, sizeof(value));
++            hasImage = hasImage || (value & 0x00FFFFFFu) != 0u;
++            bytes[i * 4u + 3u] = 255u;
++        }
++        if (hasImage)
++        {
++            d.emptyPresentRun = 0;
++            d.lastGoodPixels = frame.pixels;
++        }
++        else if (d.lastGoodPixels.size() == frame.pixels.size() && d.emptyPresentRun < 2)
++        {
++            ++d.emptyPresentRun;
++            frame.pixels = d.lastGoodPixels;
++        }
++        else if (d.emptyPresentRun < 1000)
++            ++d.emptyPresentRun;
++    }
+     // the frontend packs presentation rows with a fixed 640 pixel stride
+     if (frame.width < 640u)
+     {

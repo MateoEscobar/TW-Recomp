@@ -154,6 +154,8 @@ It runs the **new** runner (`build/ps2recomp/ps2xRuntime/ps2EntryRunner`) from `
 for EGL when present. Do not use `build/ps2xRuntime/ps2EntryRunner`: that is the retired BT3 runtime (slow, player not
 drawn). The runtime resolves `cdrom0:` against the folder of the ELF (`.disc_layout` / `.disc_meta` serve the sector
 reads), so the ISO is not needed after installing. On a laptop use the charger and `powerprofilesctl set performance`.
+Keyboard: **W/A/S/D = left stick (walk)**, arrow keys = d-pad (menus), `X`/Space = Cross, `Z` = Square (hit), `C`/Esc = Circle,
+`V` = Triangle, `Q`/`E` = L1/R1, `Enter` = Start. A gamepad is used automatically when present.
 Performance needs the VU1 microcode of the game (`games/warriors/vu1_micro/`), see `docs/vu1-nativa.md`.
 
 ## Progress
