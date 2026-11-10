@@ -1,3 +1,5 @@
+> **[TWR-27 decisión 23] Rutas históricas.** Las rutas `ps2xRuntime/src/...` de este documento son del runtime de BT3, retirado del repo. En la base actual el runtime es PS2Recomp upstream + parches (`docs/BUILD.md`); el input de Warriors usa el HLE de libpad de PS2Recomp (`TWR_PAD_DIAG=1` en `src/warriors_overrides.cpp` para diagnóstico).
+
 # Input System — DualShock 2 via SDL2
 
 ## Overview

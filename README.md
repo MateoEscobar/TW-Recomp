@@ -129,38 +129,33 @@ sudo pacman -S --needed base-devel cmake ninja git python
 
 ### Build from source
 
-The recompiled C++ sources are committed to the repo, so you only need to
-compile — no need to run ps2xRecomp yourself unless you want to regenerate them.
+TW-Recomp builds on **PS2Recomp pinned to a commit + a stack of patches** (`patches/series`, same layout as
+god-of-war-recomp). Nothing generated is committed: `scripts/build-linux.sh` clones PS2Recomp, applies the patches,
+recompiles your `SLUS_212.15` and links the runner. Linux only for now (Windows: TWR-21).
 
 ```sh
-git clone --recurse-submodules https://github.com/MateoEscobar/TW-Recomp.git
+git clone https://github.com/MateoEscobar/TW-Recomp.git
 cd TW-Recomp
+python3 scripts/extract_iso.py "/path/to/Warriors, The (USA).iso" --all   # ELF + disc tree, ~4 GB
+scripts/build-linux.sh
 
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-
-# Binary: build/ps2xRuntime/ps2EntryRunner
+# Binary: build/ps2recomp/ps2xRuntime/ps2EntryRunner
 ```
 
-See [`docs/BUILD.md`](docs/BUILD.md) for the full guide, including how to
-regenerate the recompiled sources from your own disc image.
+See [`docs/BUILD.md`](docs/BUILD.md) for the full guide (CI, guards, VU1 microcode, reproducing the CI locally).
 
 ### Run (developer preview)
 
 ```sh
-# 1. Once: extract the whole disc next to the ELF (games/warriors/, ~4 GB, ignored by git)
-python3 scripts/extract_iso.py "/path/to/Warriors, The (USA).iso" --all
-
-# 2. Run from the repository root, using the software renderer
-sed -i 's/^renderer = .*/renderer = "software"/' build/ps2xRuntime/savedata/settings.toml
-./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
+# Run from the folder that holds the extracted disc (games/warriors/ after extract_iso.py --all)
+cd games/warriors
+../../build/ps2recomp/ps2xRuntime/ps2EntryRunner SLUS_212.15
 ```
 
-The runtime resolves `cdrom0:` against the folder of the ELF, so `PS2X_CD_IMAGE` is not
-needed. The OpenGL path is opt-in (`PS2X_GPU=1`) until it is validated against the
-software renderer. Logs go to `logs/warriors.log` (or `PS2X_LOGFILE=<path>`).
-
----
+The runtime resolves `cdrom0:` against the folder of the ELF (`.disc_layout` / `.disc_meta` serve the sector reads),
+so the ISO is not needed after installing. The GS renders with OpenGL through EGL; on laptops with Intel + NVIDIA see
+the GPU note in `docs/BUILD.md`. Performance needs the VU1 microcode of the game (`games/warriors/vu1_micro/`), see
+`docs/vu1-nativa.md`.
 
 ## Progress
 
@@ -257,32 +252,27 @@ software renderer. Logs go to `logs/warriors.log` (or `PS2X_LOGFILE=<path>`).
 
 ```
 TW-Recomp/
-├── CMakeLists.txt              # Root CMake — drives the full build
 ├── CONTRIBUTING.md
 ├── docs/
-│   ├── BUILD.md                # Build guide + recompilation stats
-│   ├── function-analysis.md    # ps2xAnalyzer output summary (TWR-11)
+│   ├── BUILD.md                # Build guide, CI, reproducing the CI locally
 │   ├── boot.md                 # Boot blockers: symptom, root cause, fix (TWR-27)
 │   ├── iop.md                  # Real IOP integration (ps2xIOP, TWR-29)
+│   ├── vu1-nativa.md           # VU1 microcode coverage and performance (TWR-27)
+│   ├── function-analysis.md    # ELF analysis summary (TWR-11, historical)
 │   └── screenshots/            # Progress screenshots
-├── games/
-│   └── warriors/
-│       ├── warriors.toml       # ps2xRecomp config (stubs, patches, I/O paths)
-│       ├── patches/            # Game-specific ASM patches
-│       ├── disc-info.txt       # Disc metadata (SLUS-21215, SHA256)
-│       └── SLUS_212.15         # ELF — BYOD, ignored by git
-├── mods/                       # Optional mod assets (not shipped)
-├── ps2xRecomp/                 # MIPS→C++ recompiler (submodule: PS2Recomp)
-├── ps2xRuntime/                # PC runtime: renderer, audio, input, front-end
-│   ├── include/                # Runtime headers
-│   └── src/
-│       ├── lib/                # Core runtime (PS2Runtime, scheduler, IOP…)
-│       ├── runner/             # Generated C++ sources (16,262 files — TWR-12)
-│       ├── frontend/           # ImGui launcher / settings
-│       └── gfx/                # Host graphics backend
-├── ps2xAnalyzer/               # ELF analyzer (submodule)
+├── games/warriors/
+│   ├── warriors.toml           # Recompiler config (stubs, I/O paths)
+│   ├── function_starts.txt     # Function starts of SLUS_212.15 (CI guard input)
+│   ├── disc-info.txt           # Disc metadata (SLUS-21215, SHA256)
+│   ├── vu1_micro/              # VU1 microcode captured from the game — BYOD, ignored by git
+│   └── SLUS_212.15             # ELF — BYOD, ignored by git
+├── patches/                    # series + ps2recomp-* (from god-of-war-recomp) and twr-* (ours) on PS2Recomp
+├── src/                        # warriors_overrides.cpp — game-specific configuration and diagnostics
 ├── scripts/
-│   └── extract_iso.py          # Extracts SLUS_212.15 from your ISO
+│   ├── build-linux.sh          # Clone PS2Recomp, patch, recompile the ELF, link the runner
+│   └── extract_iso.py          # Extracts the ELF and the disc tree from your ISO
+├── tools/                      # Guards (check_*.py), iso_extract.py, VU1 generators (tools/vu1/)
+├── mods/                       # Optional mod assets (not shipped)
 ├── sonar-project.properties    # SonarQube config (sonar-cxx)
 └── textures/                   # Optional HD texture packs (not shipped)
 ```

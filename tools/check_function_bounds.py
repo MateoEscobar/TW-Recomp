@@ -9,11 +9,13 @@ JAL at 0x1EEFFC) when loading a fight; the analyzer took a `lui/ori` numeric con
 Fixed in the recompiler fork (elf_parser.cpp, IsDelaySlotOfControlTransfer); this guard keeps a
 regenerated runner from bringing the defect back.
 
-Scans ps2xRuntime/src/runner/sub_*.cpp: reads the `// Address: start - end` header and the
+Scans the generated runner (PS2Recomp/ps2xRuntime/src/runner/sub_*.cpp, or --runner <dir>): reads the `// Address: start - end` header and the
 `// 0x<addr>: <word>  <mnemonic>` comments, and fails if the last jump/branch of a function has
 its delay slot at or beyond `end`.
 
-Usage: python3 tools/check_function_bounds.py [repo_root]
+The runner is generated from the game ELF (scripts/build-linux.sh), so this guard runs there and not in CI.
+
+Usage: python3 tools/check_function_bounds.py [--runner <dir>] [repo_root]
 Exit code 0 = clean, 1 = boundary inside a delay slot, 2 = runner missing.
 """
 import glob
@@ -33,8 +35,15 @@ JUMPS = {
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    runner = os.path.join(root, "ps2xRuntime", "src", "runner")
+    argv = sys.argv[1:]
+    runner = None
+    if "--runner" in argv:
+        index = argv.index("--runner")
+        runner = argv[index + 1]
+        del argv[index:index + 2]
+    root = argv[0] if argv else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if runner is None:
+        runner = os.path.join(root, "PS2Recomp", "ps2xRuntime", "src", "runner")
     files = sorted(glob.glob(os.path.join(runner, "sub_*.cpp")))
     if not files:
         print(f"[check_function_bounds] runner not found or empty: {runner}")

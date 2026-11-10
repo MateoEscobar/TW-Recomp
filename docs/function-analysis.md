@@ -1,3 +1,5 @@
+> **[TWR-27] Documento histórico (TWR-11).** `ps2xAnalyzer` se retiró del repo; las direcciones de función vigentes salen del recompilador (`games/warriors/function_starts.txt`).
+
 # Function Analysis — The Warriors (SLUS_212.15)
 
 **Generado:** 2026-10-30  

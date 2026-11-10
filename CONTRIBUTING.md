@@ -33,10 +33,8 @@ tree — just re-run `cmake --build build --parallel`.
 
 | Area | Path |
 | --- | --- |
-| Static recompiler | `ps2xRecomp/` |
-| Runtime (EE/GS/VU1/scheduler, gfx, iop stubs) | `ps2xRuntime/src/` |
-| GS/GPU renderer (RenderWare 3.x stubs) | `ps2xRuntime/src/gfx/` |
-| In-runtime front-end (ImGui launcher, settings) | `ps2xRuntime/src/frontend/` |
+| Runtime / recompiler fixes (EE, GS, VU1, scheduler, IOP) | `patches/twr-*.patch` on top of the pinned PS2Recomp (see `docs/BUILD.md`) |
+| Game-specific configuration and diagnostics | `src/warriors_overrides.cpp` |
 | Game-specific config and analysis | `games/warriors/` |
 | Build scripts | `scripts/` |
 | Texture packs | `textures/` |

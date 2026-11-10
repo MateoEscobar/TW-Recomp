@@ -14,7 +14,7 @@ borrada en este ticket) resolvían eso de forma escalable.
 ## Arquitectura
 
 ```
- EE (código recompilado)                         IOP emulado (ps2xRecomp/ps2xIOP, ps2x::iop)
+ EE (código recompilado)                         IOP emulado (PS2Recomp/ps2xIOP, ps2x::iop)
  ───────────────────────                         ─────────────────────────────────────────
  sceSifLoadModule ─┐                             IopSubsystem
  sceSifBindRpc     │  Kernel/Syscalls/RPC.cpp    ├─ intérprete R3000A
@@ -118,7 +118,7 @@ Desaparecieron: `PS2X_IOP_MODULES`, `PS2X_IOP_IOPRP`, `PS2X_IOP_DIR`, `PS2X_IOP_
 ## Tests
 
 ```bash
-cmake -S ps2xRecomp/ps2xIOP -B build-iop-tests -G Ninja -DPS2X_IOP_BUILD_TESTS=ON
+cmake -S PS2Recomp/ps2xIOP -B build-iop-tests -G Ninja -DPS2X_IOP_BUILD_TESTS=ON   # o ver docs/BUILD.md ("Reproducir la CI")
 cmake --build build-iop-tests && ctest --test-dir build-iop-tests --output-on-failure
 ```
 

@@ -1,5 +1,11 @@
 # Boot de The Warriors — cadena de bloqueos y método de diagnóstico
 
+> **[TWR-27 decisión 23] Nota sobre rutas.** Este documento recoge la cadena de bloqueos desde la base BT3 (sesiones 1-17) y
+> la migración a PS2Recomp + parches (sesión 18). Las rutas `ps2xRuntime/` y `ps2xRecomp/` de las secciones antiguas
+> se refieren al runtime de BT3 y su fork, retirados del repo; hoy el equivalente es `PS2Recomp/` (clonado y parcheado
+> por `scripts/build-linux.sh`) y `patches/`. Rendimiento y VU1: [`vu1-nativa.md`](vu1-nativa.md).
+
+
 > TWR-27 (ADR en el meta-repo: `products/twr/planning-artifacts/TWR-27/adr.md`). Este documento
 > registra **cada** bloqueo real del boot que se encuentre, con su causa y su corrección. Regla:
 > ninguna corrección stubea, acorta o fuerza el retorno de una función del juego, ni escribe
@@ -18,7 +24,7 @@
 ```bash
 cd /var/www/html/ports/ps2/TW-Recomp
 python3 scripts/extract_iso.py "<ruta al ISO>" --all   # una vez: árbol del disco junto al ELF
-./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
+(cd games/warriors && ../../build/ps2recomp/ps2xRuntime/ps2EntryRunner SLUS_212.15)
 ```
 
 El runtime resuelve `cdrom0:` (EE y IOP) contra la carpeta del ELF, como BT3-Recomp con su `work/`. El
@@ -35,7 +41,7 @@ ISO ya no hace falta para arrancar; `PS2X_CD_IMAGE` sigue siendo opcional (ver `
    Los cuatro se activan para cualquier ELF desde `PS2Runtime::initialize()` (`ps2_diag_env.cpp`).
    - `[stallprobe]` (siempre activo) imprime, a la 2000.ª repetición del mismo PC, un **backtrace
      heurístico** del hilo: palabras de `[sp, sp+0x800)` que apuntan a código y siguen a un `jal`
-     (`*` = `jalr`). Mapear cada dirección a su `ps2xRuntime/src/runner/sub_*` da la cadena real.
+     (`*` = `jalr`). Mapear cada dirección a su `PS2Recomp/ps2xRuntime/src/runner/sub_*` (generado por build-linux.sh) da la cadena real.
 2. **Clasificar la causa** en el subsistema del productor: (a) runtime EE (hilos, semáforos,
    alarmas, interrupciones, DMA), (b) SIF/IOP (`ps2xIOP`, host adapter), (c) CD, (d) GS/VIF/VU,
    (e) input.
@@ -240,7 +246,7 @@ para todo bloque que no exista y sirve de oráculo. Son datos del juego, así qu
 
 ```bash
 # 1) capturar (se puede repetir jugando: solo añade las que falten; carpeta ignorada por git)
-GOW_VU1_CAPTURA=$PWD/games/warriors/vu1_micro ./build/ps2xRuntime/ps2EntryRunner games/warriors/SLUS_212.15
+GOW_VU1_CAPTURA=$PWD/games/warriors/vu1_micro (cd games/warriors && ../../build/ps2recomp/ps2xRuntime/ps2EntryRunner SLUS_212.15)
 # 2) generar y enlazar los bloques
 cmake -B build -DPS2X_VU1_MICROCODE_DIR=$PWD/games/warriors/vu1_micro && cmake --build build --parallel
 ```

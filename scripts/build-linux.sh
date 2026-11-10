@@ -5,7 +5,8 @@
 #   1. PS2Recomp upstream en el commit fijado (PS2RECOMP_COMMIT), clonado en ./PS2Recomp (ignorado por git).
 #   2. Parches en el orden de patches/series: primero los de god-of-war-recomp (copiados tal cual, ps2recomp-*),
 #      después los propios de Warriors (twr-*). Cada parche se genera contra el árbol con los anteriores aplicados.
-#   3. Recompilador -> C++ de SLUS_212.15 (games/warriors/warriors.toml) -> ps2xRuntime/src/runner.
+#   3. Recompilador -> C++ de SLUS_212.15 (games/warriors/warriors.toml) -> PS2Recomp/ps2xRuntime/src/runner.
+#      Guardias: tools/check_function_bounds.py, check_libm_stubs.py y check_override_addresses.py.
 #   4. ps2EntryRunner sin LTO, con register_functions.cpp a -O0 y fuera del unity build: con LTO el enlazado se come
 #      >31 GB de RAM y cuelga la máquina; a -O3 ese archivo tarda >45 min. El build corre con tope de memoria.
 #
@@ -110,7 +111,14 @@ EOF
     RUNNER="$REC/ps2xRuntime/src/runner"
     find "$RUNNER" -maxdepth 1 -type f -delete
     cp "$GEN"/* "$RUNNER"/
+
+    # Guardias (ADR TWR-27 D3/D4): necesitan el runner generado, por eso corren aquí y no en la CI (sin ELF).
+    step "Guardias"
+    python3 "$ROOT/tools/check_function_bounds.py" --runner "$RUNNER"
+    python3 "$ROOT/tools/check_libm_stubs.py"
 fi
+# Esta sí corre siempre: src/*.cpp puede haber cambiado aunque solo se recompile el runner (--runner).
+python3 "$ROOT/tools/check_override_addresses.py" --runner "$REC/ps2xRuntime/src/runner"
 
 # Código propio de Warriors (overrides y cabeceras): también en --runner.
 shopt -s nullglob

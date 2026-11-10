@@ -1,119 +1,134 @@
+# [TWR-27 decisión 23] TW-Recomp se construye sobre PS2Recomp upstream en un commit fijado + la pila de parches
+# de patches/series (misma estructura que god-of-war-recomp). La CI no tiene el juego (BYOD): comprueba todo lo que
+# no lo necesita. La recompilación del ELF y el enlazado del runner se hacen en local con scripts/build-linux.sh,
+# que además ejecuta las guardias que sí necesitan el runner generado (check_function_bounds.py).
+#
+# Pendiente (fuera de TWR-27): job de Windows y empaquetado de releases (TWR-21/TWR-22). El CMake raíz y
+# build-windows.ps1 del runtime heredado de BT3 se retiraron; no había nada que construir con ellos.
 name: CI Build
 
 on:
   push:
     branches: [develop, main]
-    tags: ['v*']
   pull_request:
     branches: [develop, main]
 
-jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-2022]
-    runs-on: ${{ matrix.os }}
+permissions:
+  contents: read
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guardias:
+    name: Guardias y scripts (sin el juego)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # [TWR-27] Toda dirección de guest enganchada (src/*.cpp, patches/twr-*.patch) debe ser un inicio de función
+      # de Warriors (ADR TWR-27 D3). Usa games/warriors/function_starts.txt, versionado.
+      - name: Check hooked guest addresses
+        run: python3 tools/check_override_addresses.py
+
+      - name: Check libm is recompiled, not stubbed
+        run: python3 tools/check_libm_stubs.py
+
+      - name: Parse scripts
+        run: |
+          bash -n scripts/build-linux.sh
+          python3 -m py_compile scripts/extract_iso.py tools/iso_extract.py tools/vu1/vu1n_gen.py \
+            tools/check_override_addresses.py tools/check_function_bounds.py tools/check_libm_stubs.py
+
+  runtime:
+    name: Parches y suites (PS2Recomp @ commit fijado)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          path: tw
 
-      # [TWR-27] Every hooked guest address must be a Warriors function start (ADR TWR-27 D3).
-      - name: Check hooked guest addresses
-        if: runner.os == 'Linux'
-        run: python3 tools/check_override_addresses.py
-
-      - name: Check recompiled function bounds
-        if: runner.os == 'Linux'
-        run: python3 tools/check_function_bounds.py
-
-      - name: Check libm is recompiled, not stubbed
-        if: runner.os == 'Linux'
-        run: python3 tools/check_libm_stubs.py
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      # El commit fijado vive en scripts/build-linux.sh, igual que en la compilación local.
+      - name: Leer el commit fijado de PS2Recomp
+        id: ps2recomp
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build \
-            libgl1-mesa-dev \
-            libavcodec-dev \
-            libavformat-dev \
-            libavutil-dev \
-            libswresample-dev \
-            libswscale-dev \
-            pkg-config \
-            xorg-dev \
-            libasound2-dev \
-            patchelf
+          commit=$(grep -oP 'PS2RECOMP_COMMIT="\K[0-9a-f]{40}' tw/scripts/build-linux.sh)
+          test -n "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "PS2Recomp @ $commit"
 
-      - name: Set up MSVC x64 environment (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Cache CMake dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            build/_deps
-            build/ThirdParty
-          key: ${{ runner.os }}-cmake-${{ hashFiles('**/CMakeLists.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-cmake-
-
-      - name: Configure CMake
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_ENABLE_SCCACHE=OFF
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      # [TWR-29] The emulated IOP (ps2xRecomp/ps2xIOP) ships its own test suite. Built standalone
-      # so it never depends on the game runtime's unity build and runs in seconds.
-      - name: Configure ps2xIOP tests
-        run: cmake -S ps2xRecomp/ps2xIOP -B build-iop-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_IOP_BUILD_TESTS=ON
-
-      - name: Build ps2xIOP tests
-        run: cmake --build build-iop-tests --parallel
-
-      - name: ps2xIOP tests
-        run: ctest --test-dir build-iop-tests --output-on-failure
-
-      - name: Package Windows release
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+      - name: Descargar PS2Recomp
         run: |
-          $staging = "dist\TW-Recomp"
-          cmake --install build --prefix $staging
-          # Rename executable to the user-facing name
-          Move-Item -Force "$staging\bin\ps2EntryRunner.exe" "$staging\bin\TW-Recomp.exe"
-          Copy-Item "games\warriors\config.ini.template" "$staging\bin\"
-          Copy-Item "README.md" "$staging\bin\"
-          $zip = "TW-Recomp-${{ github.ref_name }}-windows.zip"
-          Compress-Archive -Path "$staging\bin\*" -DestinationPath $zip -Force
-          Write-Host "==> $zip"
+          git init -q PS2Recomp
+          git -C PS2Recomp fetch -q --depth 1 https://github.com/ran-j/PS2Recomp.git ${{ steps.ps2recomp.outputs.commit }}
+          git -C PS2Recomp checkout -q FETCH_HEAD
 
-      - name: Upload Windows artifact
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: TW-Recomp-windows-${{ github.ref_name }}
-          path: TW-Recomp-${{ github.ref_name }}-windows.zip
-
-      - name: Package Linux release
-        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+      # Mismos parches y orden que scripts/build-linux.sh (patches/series). Un parche que no aplica rompe la CI.
+      - name: Aplicar los parches
+        working-directory: PS2Recomp
         run: |
-          bash scripts/build-linux.sh --package --skip-build --output dist
+          while IFS= read -r patch; do
+            [[ -z "$patch" || "$patch" == \#* ]] && continue
+            echo "::group::$patch"
+            git apply --ignore-whitespace --verbose "../tw/patches/$patch"
+            echo "::endgroup::"
+          done < ../tw/patches/series
 
-      - name: Upload Linux artifact
-        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: TW-Recomp-linux-${{ github.ref_name }}
-          path: dist/TW-Recomp-${{ github.ref_name }}-linux-x64.tar.gz
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxi-dev libgl1-mesa-dev libegl-dev libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev pkg-config
+
+      # -march=x86-64-v2: el runtime usa intrínsecos SSE4.1 que GCC solo acepta con ese objetivo.
+      - name: Configurar (suite del runtime + pruebas del IOP)
+        working-directory: PS2Recomp
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_STUDIO=OFF -DPS2X_IOP_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2
+
+      - name: Compilar
+        working-directory: PS2Recomp
+        run: |
+          ninja -C build ps2x_tests ps2_iop_emulator_tests ps2_iop_import_tests ps2_iop_compatibility_tests \
+            ps2_iop_import_version_tests
+
+      # src/warriors_overrides.cpp solo se compila de verdad junto al código generado del juego. Aquí se comprueba
+      # contra las cabeceras del runtime ya parcheado, declarando las sub_* que use.
+      - name: Compilar src/ contra el runtime parcheado
+        run: |
+          mkdir -p generado
+          {
+            echo '#pragma once'
+            echo '#include "ps2_runtime.h"'
+            grep -ho 'sub_[0-9A-F]\{8\}_0x[0-9a-f]\+' tw/src/*.cpp | sort -u |
+              sed 's/.*/void &(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);/'
+          } > generado/ps2_recompiled_functions.h
+          for f in tw/src/*.cpp; do
+            echo "$f"
+            g++ -std=c++20 -march=x86-64-v2 -fsyntax-only \
+              -IPS2Recomp/ps2xRuntime/include -IPS2Recomp/ps2xRuntime/src/lib -IPS2Recomp/ps2xRuntime/src/lib/Kernel \
+              -IPS2Recomp/ps2xIOP/include \
+              -IPS2Recomp/build/_deps/raylib-src/src -Igenerado -Itw/src "$f"
+          done
+
+      - name: Pruebas del IOP emulado
+        run: ctest --test-dir PS2Recomp/build/ps2xIOP --output-on-failure
+
+      - name: Suite del runtime
+        run: |
+          set +e
+          timeout 1200 PS2Recomp/build/ps2xTest/ps2x_tests > ps2x_tests.out 2> ps2x_tests.err
+          estado=$?
+          tail -n 8 ps2x_tests.out
+          if [ "$estado" -ne 0 ] || ! grep -q '^Failed: 0$' ps2x_tests.out || grep -q '^Total Tests: 0$' ps2x_tests.out; then
+            echo "::group::stderr de la suite (últimas 200 líneas)"
+            tail -n 200 ps2x_tests.err
+            echo "::endgroup::"
+            exit 1
+          fi

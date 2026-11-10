@@ -1015,3 +1015,18 @@ index 061682a..b49c42b 100644
  #if !defined(PLATFORM_VITA)
  bool ps2AudioOpenNamedDevice(void (*fill)(void *, unsigned int), unsigned int sampleRate); // ps2_audio_device.cpp
  void ps2AudioCloseNamedDevice();
+diff --git a/ps2xIOP/src/native/iop_native.h b/ps2xIOP/src/native/iop_native.h
+--- a/ps2xIOP/src/native/iop_native.h
++++ b/ps2xIOP/src/native/iop_native.h
+@@ -47,6 +47,11 @@
+         uint32_t offset;    // from the module base
+         const char *name;
+         void (*handler)(IopNativeCall &call);
++        // TWR: export library and ordinal of the function (-1 = not exported). Exported functions are found through the
++        // module's export table, so the override also fits other builds of the IRX (The Warriors ships its own
++        // LIBSD.IRX); the fixed offset is used only when the module is the same build (every exported offset matches).
++        const char *library = nullptr;
++        int ordinal = -1;
+     };
+ 
+     // src/native/iop_native_overrides.cpp

@@ -14,11 +14,14 @@ SHA-256 is verified against the known USA 1.03 hash.
 PSS/*.BIK, SYSTEM.CNF) junto al ELF: el runtime resuelve `cdrom0:` contra esa carpeta (EE y IOP), así
 que el juego arranca sin el ISO (que el usuario puede borrar tras instalar). Es lo que debe invocar el
 wizard de instalación. Reanudable: un archivo ya presente con el tamaño correcto no se vuelve a copiar.
+Además escribe `.disc_layout` y `.disc_meta` (tools/iso_extract.py --layout): el runtime los usa para servir las
+lecturas por sector (smpd/MultiStream) en el LSN original de cada archivo.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import stat
 import struct
 import sys
@@ -114,6 +117,15 @@ def extract_disc_tree(f, lba: int, size: int, dest: Path, rel: Path = Path()) ->
     return copied, total
 
 
+def write_disc_layout(f, dest: Path) -> None:
+    """Escribe .disc_layout/.disc_meta junto al árbol extraído (mismo código que tools/iso_extract.py --layout)."""
+    spec = importlib.util.spec_from_file_location("iso_extract", REPO_ROOT / "tools" / "iso_extract.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    files, layer1 = module.scan(f)
+    module.write_layout(f, files, layer1, str(dest))
+
+
 def extract(iso_path: Path, dest: Path, whole_disc: bool = False) -> None:
     print(f"ISO  : {iso_path}")
     print(f"Dest : {dest}")
@@ -163,11 +175,12 @@ def extract(iso_path: Path, dest: Path, whole_disc: bool = False) -> None:
         print("done")
         print(f"\n✓ {ELF_NAME} extracted successfully.")
         if not whole_disc:
-            print(f"  Next step: python3 ps2xAnalyzer/analyze.py games/warriors/{ELF_NAME}")
+            print("  Next step: scripts/build-linux.sh (recompila el ELF con la base PS2Recomp + parches)")
             return
 
         print("\nExtracting the disc tree (--all) ...")
         copied, total = extract_disc_tree(f, root_lba, root_size, dest)
+        write_disc_layout(f, dest)
         print(f"✓ disc tree ready in {dest} ({copied} file(s), {total / 1048576:,.0f} MB copied)")
         print("  The ISO is no longer needed to run the game.")
 
