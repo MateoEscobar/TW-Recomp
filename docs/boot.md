@@ -762,3 +762,26 @@ aparte al cerrar TWR-27.
 | Estado de juego `g_warriorsStateLive` | `ps2x_netplay_probe.cpp` | Lo alimentaba una sonda BT3 |
 | Sondas de solo lectura con direcciones BT3 | `RPC.cpp` (`[rpclog]` lee `0x2c9f14`), `ps2_runtime.cpp` (`PS2X_DUMP_OVERLAY` 0x334c00, sonda de bucle 0x100628/0x336a90) | Solo imprimen; opt-in |
 | Nombres `warriors*` / `g_warriors*` | varios | Eran de BT3 renombrados; se conservan para no tocar 30 consumidores en TWR-27 |
+
+---
+
+## Validación de los escenarios 1-6 sobre la base GoW (TWR-27, sesión 19, 2026-11-09)
+
+Corrida única de 222 s en un Lenovo (RTX 4060, cargador, perfil `performance`; GPU forzada con
+`__EGL_VENDOR_LIBRARY_FILENAMES=.../10_nvidia.json`), runner por defecto (`scripts/build-linux.sh`, VU1 por pares con 39
+micromemorias, backend "lean" apagado), sin variables `PS2X_*`. Entrada por XTest desde un arnés local fuera del repo
+(menús: Enter/Abajo/`x`; pelea: `d`/`a`/`w`/`s` para mover y `z` = Cuadrado para golpear). La pelea duró **79 s**.
+
+| Esc. | Criterio | Resultado |
+|---|---|---|
+| 1 | Sin overrides heredadas de BT3 | **Cumple, adaptado.** El mensaje `[game_overrides] applied N override(s)` era del runtime de BT3 y ya no existe. En la base nueva `src/warriors_overrides.cpp` solo fija el mapa de memoria (pilas/heap privado), elige el backend de VU1 y activa diagnósticos opcionales. El `grep` de `applyBt3\|warriorsPad\|0x2B8CE0\|0x27B4A0\|0x26e290\|0x26d338\|0x339A20\|PS2X_SNDNOSTOP\|RECVX\|LotR` sobre `src/`, `patches/twr-*` y `tools/` no devuelve nada; el log no contiene `[netjump]` ni `No exact recompiled function`. Los únicos `replaceFunction` son los envoltorios de `scePadRead`/`scePadGetState` bajo `TWR_PAD_DIAG=1` (apagados por defecto). `check_override_addresses.py`: OK |
+| 2 | IOP real sano | **Cumple.** Los 6 IRX cargan (`loaded IRX id=1..6`), `IOP.IRX` imprime `Exit MultiStream V7.1 Thread Load`, sin `no IOP provider sid=0x12345` ni `EE and IOP versions do not match`. `ctest` de `ps2xIOP` 4/4 y suite del runtime 463/463 (clon limpio parcheado). El log ya no dice `load-emulated`: dice `loaded IRX` |
+| 3 | Sin bucle en `0x154b50` | **Cumple el criterio medible** (0 líneas `[stallprobe]` en 222 s). **Causa no aislada por bisección**: el bucle solo existía con la capa BT3, que se retiró de la base; la hipótesis (override `ret0` de BT3 sobre `0x339A20`, el `Alloc` del gestor de heaps, que dejaba un puntero a 0 como el `JALR` a 0 visto en `0x339a44` al recortar el heap) no se verificó. Pendiente de aprobación del dev como desviación de la spec |
+| 4 | El juego produce frames | **Cumple.** `[gow-fps] imagenes` > 0 en las 220 muestras (menús a 60/s, pelea 30-60/s), `[gs-hw] draws=1 162 597`. En la base GoW la métrica es `imagenes` (presentaciones del GS), no `flips`/`prims/sec` |
+| 5 | Menú principal visible | **Cumple.** Capturas `base-gow-01..05`: título, menú principal (Story / Extras / Quick Rumble), Game Type, Choose Gangs, Choose Area |
+| 6 | Pelea Rumble ≥ 60 s sin crash, input mueve al personaje | **Cumple.** 79 s con el proceso vivo al final, sin `SIGSEGV`/abort en el log. Entre las capturas `base-gow-06..08` el personaje cambia de posición y de pose con las teclas y se ven agarres/golpes. No hay una prueba A/B de desplazamiento (solo comparación visual de 17 capturas) |
+
+Pendientes que esta corrida **no** cierra: `base-gow-09-pelea-primer-plano-dudoso.jpg` es un primer plano de un golpe con un plano
+marrón oscuro de borde diagonal a la izquierda que recuerda al defecto de "polígonos gigantes"; no se sabe si es geometría
+legítima de la cámara o un caso residual (1 de 17 capturas de pelea, con 0 de 40 en la medición dedicada). Sigue como
+defecto visual menor a vigilar (Esc. 7).
