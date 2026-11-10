@@ -147,15 +147,14 @@ See [`docs/BUILD.md`](docs/BUILD.md) for the full guide (CI, guards, VU1 microco
 ### Run (developer preview)
 
 ```sh
-# Run from the folder that holds the extracted disc (games/warriors/ after extract_iso.py --all)
-cd games/warriors
-../../build/ps2recomp/ps2xRuntime/ps2EntryRunner SLUS_212.15
+scripts/run-linux.sh
 ```
 
-The runtime resolves `cdrom0:` against the folder of the ELF (`.disc_layout` / `.disc_meta` serve the sector reads),
-so the ISO is not needed after installing. The GS renders with OpenGL through EGL; on laptops with Intel + NVIDIA see
-the GPU note in `docs/BUILD.md`. Performance needs the VU1 microcode of the game (`games/warriors/vu1_micro/`), see
-`docs/vu1-nativa.md`.
+It runs the **new** runner (`build/ps2recomp/ps2xRuntime/ps2EntryRunner`) from `games/warriors/` and picks the NVIDIA GPU
+for EGL when present. Do not use `build/ps2xRuntime/ps2EntryRunner`: that is the retired BT3 runtime (slow, player not
+drawn). The runtime resolves `cdrom0:` against the folder of the ELF (`.disc_layout` / `.disc_meta` serve the sector
+reads), so the ISO is not needed after installing. On a laptop use the charger and `powerprofilesctl set performance`.
+Performance needs the VU1 microcode of the game (`games/warriors/vu1_micro/`), see `docs/vu1-nativa.md`.
 
 ## Progress
 

@@ -36,7 +36,12 @@ scripts/build-linux.sh              # todo
 scripts/build-linux.sh --runner     # solo recompila ps2EntryRunner (overrides/runner ya copiados)
 
 # Binario: build/ps2recomp/ps2xRuntime/ps2EntryRunner
+
+# 3. Jugar
+scripts/run-linux.sh
 ```
+
+> No uses `build/ps2xRuntime/ps2EntryRunner` si existe: es del runtime viejo de BT3 (lento, jugador invisible).
 
 `scripts/build-linux.sh` hace, en orden:
 
