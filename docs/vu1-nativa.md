@@ -18,6 +18,14 @@ MAC final distinto (memoria y paquetes GIF iguales). Queda **apagado por defecto
 > microcódigo compilado por pares y cae al intérprete (49 ns/ciclo). Por eso `src/warriors_overrides.cpp` fija
 > `GOW_VU1_NATIVE_OFF=1` al detectar el juego (`TWR_VU1N=1` lo deja activo).
 
+
+> **Corrección (sesión 19, tras probarlo el dev): "imágenes/s" NO mide la velocidad del juego.** Cuenta presentaciones de
+> pantalla, que se repiten cuando el juego va lento. La velocidad real es la del propio juego:
+> `GOW_PERF_DIAG=1 GOW_PERF_FRAME_PC=0x40E8D8` imprime `guest_flip_hz` (0x40E8D8 es la función por cuadro que regula la
+> distancia de dibujo por FPS, objetivo 30). En la pelea mide **~15 cuadros/s**: el juego va a la mitad de velocidad. El
+> proceso está al límite de un hilo: EE ~2,6 s + VU1 ~2,1 s de cada 5 s (`ee_ms`, `vu_ms`). Las cifras de la tabla de arriba
+> (47 imágenes/s) son de presentación, no de velocidad de juego.
+
 ## Cómo se activa
 
 1. `scripts/build-linux.sh` pasa al CMake `PS2X_VU1_MICROCODE_DIR=games/warriors/vu1_micro` y
