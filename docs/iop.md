@@ -122,6 +122,22 @@ cmake -S PS2Recomp/ps2xIOP -B build-iop-tests -G Ninja -DPS2X_IOP_BUILD_TESTS=ON
 cmake --build build-iop-tests && ctest --test-dir build-iop-tests --output-on-failure
 ```
 
+Cobertura propia de Warriors (`patches/twr-iop-*.patch`, en `ps2_iop_emulator_tests`):
+
+- **Llamada EE→IOP pendiente**: un servidor que bloquea esperando al EE deja la llamada pendiente, responde al
+  completarse y la siguiente de la cola espera su turno.
+- **Overrides nativos por ordinal** (`twr-iop-pruebas-ordinal-y-hilo.patch`): un LIBSD con otra build, con
+  `sceSdGetParam` en un offset que la tabla integrada no conoce, recibe el override a través de su tabla de
+  exportación; el override sin ordinal se informa como "not applied"; el mismo código con otro nombre ejecuta su
+  función del guest (control).
+- **Hilo de `sceSifRpcLoop`** (mismo parche): el servidor registrado por un hilo que entró en el bucle corre en ESE hilo,
+  por debajo de su marco (`sp = (sp_bucle - 0x40) & ~15`), no en un hilo de servicio nuevo. Verificado con mutantes
+  (ignorar el ordinal; ejecutar el servidor fuera del bucle): ambos hacen fallar la prueba.
+
+Nota: dentro de un servidor ejecutado en el hilo del bucle, una segunda llamada importada `thbase:20` (`GetThreadId`)
+devolvió un valor que no era el id del hilo en un IRX sintético; no se explicó (las pruebas no dependen de ella).
+
+
 CI (`.github/workflows/build.yml`) los ejecuta en Linux y Windows.
 
 ## Limitaciones conocidas

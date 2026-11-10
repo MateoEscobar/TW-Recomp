@@ -1,0 +1,263 @@
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include <filesystem>
+ #include <iostream>
++#include <map>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+@@ -64,9 +65,33 @@
+             return kind == HostPathKind::CdRoot ? cdRoot : std::string{};
+         }
+         std::string translateGuestPath(std::string_view path) const override { return std::string(path); }
+-        uint64_t openHostFile(std::string_view) override { return 0u; }
+-        bool hostFileSize(uint64_t, uint64_t &) const override { return false; }
+-        bool readHostFile(uint64_t, uint64_t, void *, size_t, size_t &) override { return false; }
++        // TWR: in-memory host files, so a test can load an IRX by path (the module name comes from the path).
++        uint64_t openHostFile(std::string_view path) override
++        {
++            const auto found = hostFiles.find(std::string(path));
++            if (found == hostFiles.end())
++                return 0u;
++            openedHostFile = found->first;
++            return 1u;
++        }
++        bool hostFileSize(uint64_t handle, uint64_t &size) const override
++        {
++            const auto found = hostFiles.find(openedHostFile);
++            if (handle != 1u || found == hostFiles.end())
++                return false;
++            size = found->second.size();
++            return true;
++        }
++        bool readHostFile(uint64_t handle, uint64_t offset, void *destination, size_t size, size_t &bytesRead) override
++        {
++            const auto found = hostFiles.find(openedHostFile);
++            bytesRead = 0u;
++            if (handle != 1u || found == hostFiles.end() || offset > found->second.size())
++                return false;
++            bytesRead = std::min<size_t>(size, found->second.size() - static_cast<size_t>(offset));
++            std::memcpy(destination, found->second.data() + offset, bytesRead);
++            return true;
++        }
+         void closeHostFile(uint64_t) override {}
+         int32_t memoryCard(const MemoryCardRequest &) override { return 0; }
+         bool hasGuestFunction(uint32_t) const override { return false; }
+@@ -95,6 +120,8 @@
+         uint32_t eeServerSid = 0u;
+         std::vector<PostedGuestRpc> postedGuestRpcs;
+         std::vector<uint64_t> completedIopRpcs;
++        std::map<std::string, std::vector<uint8_t>> hostFiles;
++        std::string openedHostFile;
+         std::vector<uint8_t> guest;
+         std::vector<std::string> logs;
+         std::string cdRoot;
+@@ -909,6 +936,120 @@
+         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+     }
+ 
++    // TWR: the ELF + program header shared by the synthetic IRXs below (one PT_LOAD at 0x10000, RWX).
++    std::vector<uint8_t> makeSyntheticIrx(const std::vector<std::pair<uint32_t, std::vector<uint32_t>>> &pieces,
++                                          uint32_t fileSize, uint32_t memSize)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00010000u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = fileSize; program.memsz = memSize; program.flags = 7u; program.align = 4u;
++        std::vector<uint8_t> image(codeOffset + fileSize, 0u);
++        std::memcpy(image.data(), &header, sizeof(header));
++        std::memcpy(image.data() + sizeof(header), &program, sizeof(program));
++        for (const auto &piece : pieces)
++            std::memcpy(image.data() + codeOffset + piece.first, piece.second.data(), piece.second.size() * sizeof(uint32_t));
++        return image;
++    }
++
++    // TWR: an IRX whose export table ("libsd") puts ordinal 6 (sceSdGetParam) at an offset the built-in override table
++    // does not know, as in another build of LIBSD.IRX. Its start function calls that export and returns the result:
++    // 0x4242 when the guest code ran, anything else when the native override replaced it.
++    std::vector<uint8_t> makeOrdinalOverrideIrx()
++    {
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t exported = loadAddress + 0x40u;
++        constexpr uint32_t stub = loadAddress + 0x50u;
++        const std::vector<uint32_t> start = {
++            0x27BDFFE8u, // addiu sp, sp, -24
++            0xAFBF0010u, // sw    ra, 16(sp)
++            0x0C000000u | ((exported >> 2u) & 0x03FFFFFFu), // jal exported function
++            0x00002021u, // addu  a0, zero, zero (delay slot)
++            0x8FBF0010u, // lw    ra, 16(sp)
++            0x03E00008u, // jr    ra
++            0x27BD0018u, // addiu sp, sp, 24 (delay slot)
++        };
++        const std::vector<uint32_t> function = {0x03E00008u, 0x24024242u}; // jr ra ; addiu v0, zero, 0x4242
++        const std::vector<uint32_t> stubFunction = {0x03E00008u, 0x00000000u};
++        const std::vector<uint32_t> exportTable = {
++            0x41C00000u, 0u, 0x00000101u,
++            0x7362696Cu, 0x00000064u, // "libsd"
++            stub, stub, stub, stub, stub, stub, // ordinals 0-5
++            exported,                           // ordinal 6 = sceSdGetParam
++            0u,
++        };
++        return makeSyntheticIrx({{0x00u, start}, {0x40u, function}, {0x50u, stubFunction}, {0x60u, exportTable}}, 0xA0u, 0xA0u);
++    }
++
++    // TWR: an IRX whose start function creates a thread. That thread binds a queue to itself (sceSifSetRpcQueue),
++    // registers an RPC server on it (sceSifRegisterRpc) and enters sceSifRpcLoop. The id of the loop thread is stored
++    // at 0x10700 and its stack pointer at the loop frame at 0x10704; the server function returns its own stack pointer
++    // in the reply buffer.
++    std::vector<uint8_t> makeRpcLoopThreadIrx(uint32_t sid)
++    {
++        constexpr uint32_t base = 0x00010000u;
++        constexpr uint32_t registerRpc = base + 0x114u, setRpcQueue = base + 0x11Cu, rpcLoop = base + 0x124u;
++        constexpr uint32_t createThread = base + 0x148u, startThread = base + 0x150u, getThreadId = base + 0x158u;
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++        const std::vector<uint32_t> start = {
++            0x27BDFFE0u, 0xAFBF001Cu,                // addiu sp,-0x20 ; sw ra,0x1c(sp)
++            0x3C040001u, 0x34840500u,                // a0 = 0x10500 (thread descriptor)
++            jal(createThread), 0x00000000u,          // CreateThread
++            0x00402021u,                             // addu a0, v0, zero (thread id)
++            jal(startThread), 0x00002821u,           // StartThread(tid, 0)
++            0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, 0x00000000u,
++        };
++        const std::vector<uint32_t> loopThread = {
++            0x27BDFFD0u, 0xAFBF002Cu, 0xAFB00028u,   // frame; save ra, s0
++            jal(getThreadId), 0x00000000u,           // GetThreadId
++            0x00408021u,                             // addu s0, v0, zero
++            0x3C080001u, 0x35080700u, 0xAD100000u,   // *(0x10700) = tid
++            0x3C040001u, 0x34840600u,                // a0 = queue 0x10600
++            jal(setRpcQueue), 0x02002821u,           // SetRpcQueue(queue, tid) (a1 = s0 in the delay slot)
++            0x3C040001u, 0x34840200u,                // a0 = server data 0x10200
++            0x3C050000u | ((sid >> 16u) & 0xFFFFu), 0x34A50000u | (sid & 0xFFFFu), // a1 = sid
++            0x3C060001u, 0x34C60300u,                // a2 = server function 0x10300
++            0x3C070001u, 0x34E70400u,                // a3 = server buffer 0x10400
++            0xAFA00010u, 0xAFA00014u,                // callback, callback buffer = 0
++            0x3C080001u, 0x35080600u,                // t0 = queue
++            jal(registerRpc), 0xAFA80018u,           // RegisterRpc(..., queue at 0x18(sp))
++            0x3C080001u, 0x35080700u, 0xAD1D0004u,   // *(0x10704) = sp of the loop frame
++            0x3C040001u, 0x34840600u,                // a0 = queue
++            jal(rpcLoop), 0x00000000u,               // sceSifRpcLoop(queue): the thread now serves its queue
++            0x8FB00028u, 0x8FBF002Cu, 0x27BD0030u, 0x03E00008u, 0x00000000u,
++        };
++        const std::vector<uint32_t> handler = {
++            0x27BDFFE8u,                             // addiu sp, sp, -0x18
++            0x3C080001u, 0x35080400u,                // t0 = reply buffer 0x10400
++            0xAD1D0000u,                             // *(0x10400) = sp (where this server function runs)
++            0x01001021u,                             // addu v0, t0, zero (reply buffer)
++            0x03E00008u, 0x27BD0018u,                // jr ra ; addiu sp, sp, 0x18
++        };
++        const std::vector<uint32_t> imports = {
++            0x41E00000u, 0u, 0x00000101u, 0x63666973u, 0x0000646Du, // "sifcmd"
++            0x03E00008u, 0x24000011u,  // 17 sceSifRegisterRpc
++            0x03E00008u, 0x24000013u,  // 19 sceSifSetRpcQueue
++            0x03E00008u, 0x24000016u,  // 22 sceSifRpcLoop
++            0u, 0u,
++            0x41E00000u, 0u, 0x00000101u, 0x61626874u, 0x00006573u, // "thbase"
++            0x03E00008u, 0x24000004u,  // 4 CreateThread
++            0x03E00008u, 0x24000006u,  // 6 StartThread
++            0x03E00008u, 0x24000014u,  // 20 GetThreadId
++            0u, 0u,
++        };
++        const std::vector<uint32_t> descriptor = {0u, 0u, base + 0x40u, 0x1000u, 0x20u};
++        return makeSyntheticIrx({{0x00u, start}, {0x40u, loopThread}, {0x100u, imports}, {0x300u, handler},
++                                 {0x500u, descriptor}},
++                                0x520u, 0x800u);
++    }
++
+     bool expect(bool value, const char *message)
+     {
+         if (!value)
+@@ -1278,6 +1419,84 @@
+     if (!expect(!emittedUnhandledSeek,
+                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+ 
++
++    // TWR: overrides found through the export table (library + ordinal), so they also fit another build of the IRX.
++    // A LIBSD whose sceSdGetParam is not where the built-in table expects must still get the native override, and the
++    // override that has no ordinal ("libsd bus setup") must be reported as not applied. The same code under another
++    // module name is the control: nothing replaces it and the guest function runs.
++    {
++        const std::vector<uint8_t> image = makeOrdinalOverrideIrx();
++        {
++            TestHost libsdHost(0x20000u);
++            libsdHost.hostFiles["cdrom0:\\MODULES\\LIBSD.IRX;1"] = image;
++            IopSubsystem libsdIop(libsdHost);
++            const ModuleLoadResult libsd = libsdIop.loadModule("cdrom0:\\MODULES\\LIBSD.IRX;1");
++            if (!expect(libsd.handled && libsd.moduleId > 0, "The synthetic LIBSD.IRX did not load")) return 1;
++            if (!expect(libsd.startResult != 0x4242,
++                        "The native override was not applied through the export table (the guest function ran)")) return 1;
++            const auto mentions = [&](const char *text)
++            {
++                return std::any_of(libsdHost.logs.begin(), libsdHost.logs.end(),
++                                   [&](const std::string &message)
++                                   { return message.find("native overrides not applied") != std::string::npos &&
++                                            message.find(text) != std::string::npos; });
++            };
++            if (!expect(mentions("libsd bus setup"),
++                        "The override without an ordinal was not reported as not applied for another build")) return 1;
++            if (!expect(!mentions("sceSdGetParam"),
++                        "The override found through its ordinal was reported as not applied")) return 1;
++        }
++        {
++            TestHost otherHost(0x20000u);
++            otherHost.hostFiles["cdrom0:\\MODULES\\OTHER.IRX;1"] = image;
++            IopSubsystem otherIop(otherHost);
++            const ModuleLoadResult other = otherIop.loadModule("cdrom0:\\MODULES\\OTHER.IRX;1");
++            if (!expect(other.handled && other.moduleId > 0, "The control IRX did not load")) return 1;
++            if (!expect(other.startResult == 0x4242,
++                        "Control: a module without overrides must run its own guest function")) return 1;
++        }
++    }
++
++    // TWR: an RPC server registered by a thread that entered sceSifRpcLoop runs in THAT thread. The first
++    // attempt ran it in a new service thread and the wake-up of the loop thread was lost (black screen on the Warriors).
++    {
++        TestHost loopHost(0x20000u);
++        IopSubsystem loopIop(loopHost);
++        constexpr uint32_t loopSid = 0x5EC0DE01u;
++        const std::vector<uint8_t> loopImage = makeRpcLoopThreadIrx(loopSid);
++        std::memcpy(loopHost.guest.data() + 0x100u, loopImage.data(), loopImage.size());
++        const ModuleLoadResult loopModule = loopIop.loadModuleBuffer(0x100u);
++        if (!expect(loopModule.handled && loopModule.startResult == 0, "The RPC loop thread IRX did not start")) return 1;
++        for (int i = 0; i < 200 && !loopIop.canBindRpc(loopSid); ++i)
++            loopIop.runEeCycles(100000u);
++        if (!expect(loopIop.canBindRpc(loopSid), "The thread never registered its RPC server")) return 1;
++        uint32_t loopThreadId = 0u, loopFrameSp = 0u;
++        if (!expect(loopIop.readMemory(0x00010700u, &loopThreadId, sizeof(loopThreadId)) && loopThreadId != 0u &&
++                        loopIop.readMemory(0x00010704u, &loopFrameSp, sizeof(loopFrameSp)) && loopFrameSp != 0u,
++                    "The loop thread did not record its id and stack pointer")) return 1;
++        if (!expect(loopIop.debugSnapshot().emulatorRpcServers == 1u, "Registered RPC server count mismatch")) return 1;
++        // The server function starts below the loop frame (sp = (loopSp - 0x40) & ~15), then its own prologue
++        // takes 0x18 more. Another thread would run it on its own stack.
++        const uint32_t expectedServerSp = ((loopFrameSp - 0x40u) & ~15u) - 0x18u;
++        for (uint32_t call = 0u; call < 2u; ++call)
++        {
++            const size_t completedBefore = loopHost.completedIopRpcs.size();
++            const uint32_t receiveAddress = 0x900u + 0x10u * call;
++            std::memset(loopHost.guest.data() + receiveAddress, 0, sizeof(uint32_t));
++            RpcRequest request{};
++            request.sid = loopSid;
++            request.receive = {receiveAddress, sizeof(uint32_t)};
++            const RpcResult result = loopIop.handleRpc(request);
++            if (!expect(result.handled, "The EE call to the loop-thread server was not handled")) return 1;
++            for (int i = 0; i < 200 && result.pending && loopHost.completedIopRpcs.size() == completedBefore; ++i)
++                loopIop.runEeCycles(100000u);
++            uint32_t serverSp = 0u;
++            std::memcpy(&serverSp, loopHost.guest.data() + receiveAddress, sizeof(serverSp));
++            if (!expect(serverSp == expectedServerSp,
++                        "The server function did not run in the sceSifRpcLoop thread, below its loop frame")) return 1;
++        }
++    }
++
+     std::cout << "ps2xIOP emulator smoke tests passed\n";
+     return 0;
+ }
